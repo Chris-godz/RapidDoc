@@ -53,3 +53,7 @@ _build/
 output*/
 
 **/rapid_*_self/**/models/*
+*.onnx
+*.egg-info/
+*.dxnn
+build/

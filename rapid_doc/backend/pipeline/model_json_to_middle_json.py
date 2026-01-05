@@ -2,10 +2,9 @@
 import os
 import time
 
-from loguru import logger
 from tqdm import tqdm
 
-from rapid_doc.utils.config_reader import get_device, get_llm_aided_config, get_formula_enable
+from rapid_doc.utils.config_reader import get_device, get_formula_enable
 from rapid_doc.backend.pipeline.model_init import AtomModelSingleton
 from rapid_doc.backend.pipeline.para_split import para_split
 from rapid_doc.utils.block_pre_proc import prepare_block_bboxes, process_groups
@@ -13,10 +12,10 @@ from rapid_doc.utils.block_sort import sort_blocks_by_bbox
 from rapid_doc.utils.boxbase import calculate_overlap_area_in_bbox1_area_ratio
 from rapid_doc.utils.cut_image import cut_image_and_table
 from rapid_doc.utils.enum_class import ContentType
-from rapid_doc.utils.llm_aided import llm_aided_title
 from rapid_doc.utils.model_utils import clean_memory
 from rapid_doc.backend.pipeline.pipeline_magic_model import MagicModel
 from rapid_doc.utils.ocr_utils import OcrConfidence
+from rapid_doc.utils.pdf_image_tools import save_table_fill_image
 from rapid_doc.utils.span_block_fix import fill_spans_in_blocks, fix_discarded_block, fix_block_spans
 from rapid_doc.utils.span_pre_proc import remove_outside_spans, remove_overlaps_low_confidence_spans, \
     remove_overlaps_min_spans, txt_spans_extract
@@ -25,13 +24,17 @@ from rapid_doc.version import __version__
 from rapid_doc.utils.hash_utils import bytes_md5
 
 
-def page_model_info_to_page_info(page_model_info, image_dict, page_dict, image_writer, page_index, ocr_enable=False, formula_enabled=True):
+def page_model_info_to_page_info(page_model_info, image_dict, page_dict, image_writer, page_index, ocr_enable=False, formula_enabled=True, image_config=None):
     scale = image_dict["scale"]
     page_pil_img = image_dict["img_pil"]
     # page_img_md5 = str_md5(image_dict["img_base64"])
     page_img_md5 = bytes_md5(page_pil_img.tobytes())
     page_w, page_h = map(int, page_dict['size'])
     magic_model = MagicModel(page_model_info, scale)
+    extract_original_image = image_config.get("extract_original_image", False) if image_config else False
+    extract_original_image_iou_thresh = image_config.get("extract_original_image_iou_thresh", 0.9) if image_config else 0.9
+    """保存表格里的图片"""
+    save_table_fill_image(page_model_info['layout_dets'], page_dict.get('table_fill_image_list', []), page_img_md5, page_index, image_writer)
 
     """从magic_model对象中获取后面会用到的区块信息"""
     discarded_blocks = magic_model.get_discarded()
@@ -155,7 +158,7 @@ def page_model_info_to_page_info(page_model_info, image_dict, page_dict, image_w
     for span in spans:
         if span['type'] in [ContentType.IMAGE, ContentType.TABLE, ContentType.INTERLINE_EQUATION]:
             span = cut_image_and_table(
-                span, page_pil_img, page_img_md5, page_index, image_writer, scale=scale
+                span, page_dict['ori_image_list'], extract_original_image, extract_original_image_iou_thresh, page_pil_img, page_img_md5, page_index, image_writer, scale=scale
             )
 
     """span填充进block"""
@@ -173,14 +176,14 @@ def page_model_info_to_page_info(page_model_info, image_dict, page_dict, image_w
     return page_info
 
 
-def result_to_middle_json(model_list, images_list, page_dict_list, image_writer, lang=None, ocr_enable=False, formula_enabled=True, ocr_config=None):
+def result_to_middle_json(model_list, images_list, page_dict_list, image_writer, lang=None, ocr_enable=False, formula_enabled=True, ocr_config=None, image_config=None):
     middle_json = {"pdf_info": [], "_backend":"pipeline", "_version_name": __version__}
     formula_enabled = get_formula_enable(formula_enabled)
     for page_index, page_model_info in tqdm(enumerate(model_list), total=len(model_list), desc="Processing pages"):
         page_dict = page_dict_list[page_index]
         image_dict = images_list[page_index]
         page_info = page_model_info_to_page_info(
-            page_model_info, image_dict, page_dict, image_writer, page_index, ocr_enable=ocr_enable, formula_enabled=formula_enabled
+            page_model_info, image_dict, page_dict, image_writer, page_index, ocr_enable=ocr_enable, formula_enabled=formula_enabled, image_config=image_config
         )
         if page_info is None:
             page_w, page_h = map(int, page_dict['size'])
@@ -209,7 +212,7 @@ def result_to_middle_json(model_list, images_list, page_dict_list, image_writer,
                     img_crop_list.append(span['np_img'])
                     span.pop('np_img')
     if len(img_crop_list) > 0:
-        start = time.perf_counter()
+        # start = time.perf_counter()
         atom_model_manager = AtomModelSingleton()
         ocr_model = atom_model_manager.get_atom_model(
             atom_model_name='ocr',
@@ -236,18 +239,6 @@ def result_to_middle_json(model_list, images_list, page_dict_list, image_writer,
 
     """表格跨页合并"""
     merge_table(middle_json["pdf_info"])
-
-    """llm优化"""
-    llm_aided_config = get_llm_aided_config()
-
-    if llm_aided_config is not None:
-        """标题优化"""
-        title_aided_config = llm_aided_config.get('title_aided', None)
-        if title_aided_config is not None:
-            if title_aided_config.get('enable', False):
-                llm_aided_title_start_time = time.time()
-                llm_aided_title(middle_json["pdf_info"], title_aided_config)
-                logger.info(f'llm aided title time: {round(time.time() - llm_aided_title_start_time, 2)}')
 
     """清理内存"""
     # pdf_doc.close()

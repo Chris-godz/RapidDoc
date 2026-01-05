@@ -41,17 +41,18 @@ def do_parse(
     end_page_id=None,  # End page ID for parsing, default is None (parse all pages until the end of the document)
 ):
 
-
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
     layout_config = {
         # "model_type": LayoutModelType.PP_DOCLAYOUT_PLUS_L,
         # "conf_thresh": 0.4,
-        # "batch_num": 1,
-        # "model_dir_or_path": "C:\ocr\models\ppmodel\layout\PP-DocLayout-L\pp_doclayout_l.onnx"
+        "batch_num": 1,
+        "model_dir_or_path": os.path.join(project_dir, "onnx_models", "pp_doclayout_l.onnx")
     }
 
     ocr_config = {
-        # "Det.model_path": r"C:\ocr\models\ppmodel\ocr\v4\ch_PP-OCRv4_det_infer\openvino\ch_PP-OCRv4_det_infer.onnx",
-        # "Rec.model_path": r"C:\ocr\models\ppmodel\ocr\v4\ch_PP-OCRv4_rec_infer\openvino\ch_PP-OCRv4_rec_infer.onnx",
+        "Det.model_path": os.path.join(project_dir, "onnx_models", "ch_PP-OCRv5_server_det.onnx"),
+        "Rec.model_path": os.path.join(project_dir, "onnx_models", "ch_PP-OCRv5_rec_server_infer.onnx"),
         # "Rec.rec_batch_num": 1,
 
         # "Det.ocr_version": OCRVersion.PPOCRV5,
@@ -62,39 +63,53 @@ def do_parse(
         # 新增的自定义参数
         # "engine_type": OCREngineType.TORCH, # 统一设置推理引擎
         # "Det.rec_batch_num": 1, # Det批处理大小
+
+        # 文本检测框模式：auto（默认）、txt、ocr
+        # "use_det_mode": 'auto' #（1、txt只会从pypdfium2获取文本框，2、ocr只会从OCR-det获取文本框，3、auto先从pypdfium2获取文本框，提取不到再使用OCR-det提取）
     }
 
     formula_config = {
         # "model_type": FormulaModelType.PP_FORMULANET_PLUS_S,
         # "formula_level": 1, # 公式识别等级，默认为0，全识别。1:仅识别行间公式，行内公式不识别
         # "batch_num": 1,
-        # "model_dir_or_path": r"C:\ocr\models\ppmodel\formula\PP-FormulaNet_plus-S\pp_formulanet_plus_s.onnx"
+        "model_dir_or_path": os.path.join(project_dir, "onnx_models", "pp_formulanet_plus_l.onnx")
     }
 
     # os.environ['MINERU_MODEL_SOURCE'] = 'local'
 
     table_config = {
         # "force_ocr": False, # 表格文字，是否强制使用ocr，默认 False 根据 parse_method 来判断是否需要ocr还是从pdf中直接提取文本
+        # 注：文字版pdf可以使用pypdfium2提取到表格内图片，扫描版或图片需要使用PP_DOCLAYOUT_PLUS_L版面识别模型，才能识别到表格内的图片
+        # "skip_text_in_image": True, # 是否跳过表格里图片中的文字（如表格单元格中嵌入的图片、图标、扫描底图等）
+        # "use_img2table": False, # 是否优先使用img2table库提取表格，需要手动安装（pip install img2table），基于opencv识别准确度不如使用模型，但是速度很快，默认关闭
+
         # "model_type": TableModelType.UNET_SLANET_PLUS,  # （默认） 有线表格使用unet，无线表格使用slanet_plus
         # "model_type": TableModelType.UNET_UNITABLE, # 有线表格使用unet，无线表格使用unitable
         # "model_type": TableModelType.SLANEXT,  # 有线表格使用slanext_wired，无线表格使用slanext_wireless
 
         # "model_dir_or_path": "", #单个模型使用。如SLANET_PLUS、UNITABLE
 
-        # "cls.model_dir_or_path": "", # 表格分类模型地址
+        "cls.model_dir_or_path": None, # 表格分类模델 비활성화 (classifier 모듈 건너뛰기)
 
-        # "unet.model_dir_or_path": "", # UNET表格模型地址
+        "unet.model_dir_or_path": os.path.join(project_dir, "onnx_models", "unet.onnx"), # UNET表格模型地址
 
         # "unitable.model_dir_or_path": "", # UNITABLE表格模型地址
-        # "slanet_plus.model_dir_or_path": "", # SLANET_PLUS表格模型地址
+        "slanet_plus.model_dir_or_path": os.path.join(project_dir, "onnx_models", "unet.onnx"), # SLANET_PLUS表格模型地址
 
         # "wired_cell.model_dir_or_path": "", # 有线单元格模型地址，配置SLANEXT时使用
         # "wireless_cell.model_dir_or_path": "", # 无线单元格模型地址，配置SLANEXT时使用
         # "wired_table.model_dir_or_path": "", # 有线表结构模型地址，配置SLANEXT时使用
         # "wireless_table.model_dir_or_path": "", # 无线表结构模型地址，配置SLANEXT时使用,
     }
+
     checkbox_config = {
         # "checkbox_enable": False, # 是否识别复选框，默认不识别，基于opencv，有可能会误检
+    }
+
+    # 版面识别元素为图片的配置
+    image_config = {
+        # "extract_original_image": True, # 是否提取原始图片（使用 pypdfium2 提取原始图片。截图可能导致清晰度降低和边界丢失，默认关闭）
+        # "extract_original_image_iou_thresh": 0.5, # 是否提取原始图片和版面识别的图片，bbox重叠度，默认0.9
     }
     for idx, pdf_bytes in enumerate(pdf_bytes_list):
         new_pdf_bytes = convert_pdf_bytes_to_bytes_by_pypdfium2(pdf_bytes, start_page_id, end_page_id)
@@ -113,7 +128,7 @@ def do_parse(
         pdf_dict = all_page_dicts[idx]
         _lang = lang_list[idx]
         _ocr_enable = ocr_enabled_list[idx]
-        middle_json = pipeline_result_to_middle_json(model_list, images_list, pdf_dict, image_writer, _lang, _ocr_enable, formula_enable, ocr_config=ocr_config)
+        middle_json = pipeline_result_to_middle_json(model_list, images_list, pdf_dict, image_writer, _lang, _ocr_enable, formula_enable, ocr_config=ocr_config, image_config=image_config)
 
         pdf_info = middle_json["pdf_info"]
 

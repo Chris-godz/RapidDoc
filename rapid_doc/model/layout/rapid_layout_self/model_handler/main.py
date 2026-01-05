@@ -19,7 +19,7 @@ class ModelHandler:
 
         if model_type.startswith("pp_doc") or model_type.startswith("rt_detr"):
             return PPDocLayoutModelHandler(
-                session.characters, cfg.conf_thresh, cfg.iou_thresh, session, cfg.model_type
+                session.characters, cfg.conf_thresh, cfg.iou_thresh, session, cfg.model_type, cfg.engine_type
             )
 
     def __call__(self, img_list: List[np.ndarray]) -> List[RapidLayoutOutput]:

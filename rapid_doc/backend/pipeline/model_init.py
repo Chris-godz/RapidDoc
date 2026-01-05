@@ -6,20 +6,21 @@ from .model_list import AtomicModel
 from ...model.layout.rapid_layout import RapidLayoutModel
 from ...model.formula.rapid_formula_model import RapidFormulaModel
 from ...model.ocr.rapid_ocr import RapidOcrModel
+from ...model.ocr.dx_ocr import DxOcrModel
 from ...model.table.rapid_table import RapidTableModel
 from ...utils.hash_utils import make_hashable
 
-def table_model_init(lang=None, ocr_config=None, table_config=None):
+def table_model_init(ocr_config=None, table_config=None):
+    use_async = table_config.get('use_async', False) if table_config else False
     atom_model_manager = AtomModelSingleton()
     ocr_engine = atom_model_manager.get_atom_model(
         atom_model_name=AtomicModel.OCR,
         det_db_box_thresh=0.5,
         det_db_unclip_ratio=1.6,
-        lang=lang,
         ocr_config=ocr_config,
         enable_merge_det_boxes=False
     )
-    table_model = RapidTableModel(ocr_engine, table_config)
+    table_model = RapidTableModel(ocr_engine, table_config, use_async=use_async)
     return table_model
 
 def formula_model_init(formula_config=None):
@@ -28,17 +29,61 @@ def formula_model_init(formula_config=None):
 
 
 def layout_model_init(layout_config=None):
-    model = RapidLayoutModel(layout_config)
+    # layout_config에서 use_async 추출 (있는 경우에만)
+    use_async = layout_config.get('use_async', False) if layout_config else False
+    model = RapidLayoutModel(layout_config, use_async=use_async)
     return model
 
-def ocr_model_init(det_db_box_thresh=0.3, lang=None, ocr_config=None, det_db_unclip_ratio=1.8, enable_merge_det_boxes=True):
-    model = RapidOcrModel(
+def ocr_model_init(det_db_box_thresh=0.3, ocr_config=None, det_db_unclip_ratio=1.8, enable_merge_det_boxes=True):
+    # DX Engine 사용 여부 확인
+    use_dx_engine = False
+    use_async = False
+    if ocr_config:
+        engine_type = ocr_config.get('engine_type')
+        use_async = ocr_config.get('use_async', False)
+        if engine_type and hasattr(engine_type, 'value') and engine_type.value == 'dxengine':
+            use_dx_engine = True
+        elif isinstance(engine_type, str) and engine_type.lower() == 'dxengine':
+            use_dx_engine = True
+    
+    if use_dx_engine:
+        # DX Engine 기반 OCR 모델 사용
+        logger.info(f"Using DX Engine for OCR ({'ASYNC' if use_async else 'SYNC'} mode)")
+        logger.info(f"DX Engine model paths: {det_db_box_thresh}, {det_db_unclip_ratio}")
+        model = DxOcrModel(
+            det_model_path=ocr_config.get('Det.model_path'),
+            rec_model_path=ocr_config.get('Rec.model_path'),
             det_db_box_thresh=det_db_box_thresh,
-            lang=lang,
+            det_db_unclip_ratio=det_db_unclip_ratio,
+            enable_merge_det_boxes=enable_merge_det_boxes,
+            lang=None,  # lang은 실제로 사용되지 않음
             ocr_config=ocr_config,
+            use_async=use_async,
+        )
+    else:
+        # 기존 RapidOCR 사용 - DX Engine 전용 설정 제거
+        logger.info("Using RapidOCR (ONNX Runtime/OpenVINO/Torch/Paddle)")
+        
+        # DX Engine 전용 키 필터링
+        dx_only_keys = [
+            'use_multi_det_model', 'use_multi_rec_model',
+            'Det.model_paths', 'Rec.model_paths',
+            'save_debug_images', 'debug_save_dir',
+            'engine_type',  # DX Engine의 'dxengine' 문자열
+            'use_async',  # async 관련 키도 필터링
+        ]
+        
+        # ocr_config 복사 후 DX 전용 키 제거
+        filtered_ocr_config = {k: v for k, v in ocr_config.items() if k not in dx_only_keys} if ocr_config else {}
+        
+        model = RapidOcrModel(
+            det_db_box_thresh=det_db_box_thresh,
+            lang=None,  # lang은 실제로 사용되지 않음
+            ocr_config=filtered_ocr_config,
             use_dilation=True,
             det_db_unclip_ratio=det_db_unclip_ratio,
-            enable_merge_det_boxes=enable_merge_det_boxes,)
+            enable_merge_det_boxes=enable_merge_det_boxes,
+        )
     return model
 
 
@@ -79,15 +124,13 @@ def atom_model_init(model_name: str, **kwargs):
         )
     elif model_name == AtomicModel.OCR:
         atom_model = ocr_model_init(
-            kwargs.get('det_db_box_thresh', 0.3),
-            kwargs.get('lang'),
+            kwargs.get('det_db_box_thresh', 0.6),
             kwargs.get('ocr_config'),
-            kwargs.get('det_db_unclip_ratio', 1.8),
+            kwargs.get('det_db_unclip_ratio', 2.0),
             kwargs.get('enable_merge_det_boxes', True)
         )
     elif model_name == AtomicModel.Table:
         atom_model = table_model_init(
-            kwargs.get('lang'),
             kwargs.get('ocr_config'),
             kwargs.get('table_config'),
         )
@@ -135,14 +178,12 @@ class MineruPipelineModel:
         self.ocr_model = atom_model_manager.get_atom_model(
             atom_model_name=AtomicModel.OCR,
             det_db_box_thresh=0.3,
-            lang=self.lang,
             ocr_config=self.ocr_config,
         )
         # init table model
         if self.apply_table:
             self.table_model = atom_model_manager.get_atom_model(
                 atom_model_name=AtomicModel.Table,
-                lang=self.lang,
                 ocr_config=self.ocr_config,
                 table_config=self.table_config,
             )

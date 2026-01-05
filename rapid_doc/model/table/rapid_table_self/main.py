@@ -62,7 +62,12 @@ class RapidTable:
             return UniTableStructure(asdict(self.cfg))
 
         if self.cfg.model_type == ModelType.UNET:
-            wired_input = WiredTableInput(model_path=self.cfg.model_dir_or_path, use_cuda=self.cfg.engine_cfg.get('use_cuda', False))
+            wired_input = WiredTableInput(
+                model_path=self.cfg.model_dir_or_path, 
+                use_cuda=self.cfg.engine_cfg.get('use_cuda', False), 
+                engine_type=self.cfg.engine_type,
+                use_async=self.cfg.use_async
+            )
             return WiredTableRecognition(wired_input)
 
         from .table_structure.pp_structure import PPTableStructurer

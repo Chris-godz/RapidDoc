@@ -60,8 +60,10 @@ class RapidOcrModel(object):
                 default_params[key] = value
 
         if device.startswith('cuda'):
-            if not engine_type:
-                # cuda 环境默认使用 torch
+            # 检查用户是否指定了 Det.engine_type 或 engine_type
+            det_engine_specified = default_params.get('Det.engine_type') is not None
+            if not engine_type and not det_engine_specified:
+                # cuda 环境默认使用 torch（仅当用户未指定时）
                 default_params["Det.engine_type"] = EngineType.TORCH
                 default_params["Rec.engine_type"] = EngineType.TORCH
             gpu_id = int(device.split(':')[1]) if ':' in device else 0 # GPU 编号
@@ -76,7 +78,11 @@ class RapidOcrModel(object):
                 default_params['EngineConfig.paddle.use_cuda'] = True
                 default_params['EngineConfig.paddle.gpu_id'] = gpu_id
         default_params.pop('engine_type', None)
-        default_params.pop('use_det_bbox', None)
+        default_params.pop('use_det_mode', None)
+        default_params.pop('use_multi_rec_model', None)
+        default_params.pop('save_debug_images', None)
+        default_params.pop('debug_save_dir', None)
+        
         self.ocr_engine = RapidOCR(params=default_params)
         self.text_detector = self.ocr_engine.text_det
         self.text_recognizer = self.ocr_engine.text_rec

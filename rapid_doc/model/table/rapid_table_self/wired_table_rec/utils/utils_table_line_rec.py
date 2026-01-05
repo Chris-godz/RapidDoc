@@ -94,7 +94,16 @@ def calculate_center_rotate_angle(box):
     ) / 2
     # x = cx-w/2
     # y = cy-h/2
-    sinA = (h * (x1 - cx) - w * (y1 - cy)) * 1.0 / (h * h + w * w) * 2
+    
+    # Division by zero 방지: w와 h가 모두 0에 가까운 경우 처리
+    denominator = h * h + w * w
+    if denominator < 1e-6:  # 매우 작은 값 (퇴화된 박스)
+        # 기본값 반환: 각도 0, 작은 크기
+        return 0.0, max(w, 1e-3), max(h, 1e-3), cx, cy
+    
+    sinA = (h * (x1 - cx) - w * (y1 - cy)) * 1.0 / denominator * 2
+    # sinA 값이 [-1, 1] 범위를 벗어나는 경우 clipping (arcsin의 정의역)
+    sinA = np.clip(sinA, -1.0, 1.0)
     angle = np.arcsin(sinA)
     return angle, w, h, cx, cy
 

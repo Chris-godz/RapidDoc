@@ -40,9 +40,11 @@ KEY_TO_MODEL_URL = {
 @dataclass
 class WiredTableInput:
     model_type: Optional[str] = ModelType.UNET.value
+    engine_type: Optional[str] = "onnxruntime"
     model_path: Union[str, Path, None, Dict[str, str]] = None
     use_cuda: bool = False
     device: str = "cpu"
+    use_async: bool = False  # Async 모드 사용 여부
 
 
 @dataclass

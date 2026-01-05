@@ -20,7 +20,7 @@ from rapid_doc.backend.pipeline.pipeline_analyze import doc_analyze as pipeline_
 from rapid_doc.backend.pipeline.pipeline_middle_json_mkcontent import union_make as pipeline_union_make
 from rapid_doc.backend.pipeline.model_json_to_middle_json import result_to_middle_json as pipeline_result_to_middle_json
 
-from rapidocr import EngineType as OCREngineType, OCRVersion, ModelType
+from rapidocr import EngineType as OCREngineType, OCRVersion, ModelType as OCRModelType
 from rapid_doc.model.layout.rapid_layout_self import ModelType as LayoutModelType
 from rapid_doc.model.formula.rapid_formula_self import ModelType as FormulaModelType
 from rapid_doc.model.table.rapid_table_self import ModelType as TableModelType
@@ -59,15 +59,15 @@ def do_parse(
 
         # "Det.ocr_version": OCRVersion.PPOCRV5,
         # "Rec.ocr_version": OCRVersion.PPOCRV5,
-        # "Det.model_type": ModelType.SERVER,
-        # "Rec.model_type": ModelType.SERVER,
+        # "Det.model_type": OCRModelType.SERVER,
+        # "Rec.model_type": OCRModelType.SERVER,
 
         # 新增的自定义参数
         # "engine_type": OCREngineType.TORCH, # 统一设置推理引擎
         # "Det.rec_batch_num": 1, # Det批处理大小
 
-        # 是否使用ocr的Det定位文本行，默认False，直接使用pdf里的文本bbox，当parse_method="ocr"或parse_method="auto"自动判断为需要ocr时，use_det_bbox会自动变为True
-        # "use_det_bbox": False
+        # 文本检测框模式：auto（默认）、txt、ocr
+        # "use_det_mode": 'auto' #（1、txt只会从pypdfium2获取文本框，2、ocr只会从OCR-det获取文本框，3、auto先从pypdfium2获取文本框，提取不到再使用OCR-det提取）
     }
 
     formula_config = {
@@ -81,9 +81,13 @@ def do_parse(
 
     table_config = {
         # "force_ocr": False, # 表格文字，是否强制使用ocr，默认 False 根据 parse_method 来判断是否需要ocr还是从pdf中直接提取文本
+        # 注：文字版pdf可以使用pypdfium2提取到表格内图片，扫描版或图片需要使用PP_DOCLAYOUT_PLUS_L版面识别模型，才能识别到表格内的图片
+        # "skip_text_in_image": True, # 是否跳过表格里图片中的文字（如表格单元格中嵌入的图片、图标、扫描底图等）
+        # "use_img2table": False, # 是否优先使用img2table库提取表格，需要手动安装（pip install img2table），基于opencv识别准确度不如使用模型，但是速度很快，默认关闭
+
         # "model_type": TableModelType.UNET_SLANET_PLUS,  # （默认） 有线表格使用unet，无线表格使用slanet_plus
         # "model_type": TableModelType.UNET_UNITABLE, # 有线表格使用unet，无线表格使用unitable
-        # "model_type": TableModelType.SLANEXT,  # 有线表格使用slanext_wired，无线表格使用slanext_wireless
+        # "model_type": TableModelType.SLANETPLUS,  # 有线表格使用slanext_wired，无线表格使用slanext_wireless
 
         # "model_dir_or_path": "", #单个模型使用。如SLANET_PLUS、UNITABLE
 
@@ -102,6 +106,12 @@ def do_parse(
 
     checkbox_config = {
         # "checkbox_enable": False, # 是否识别复选框，默认不识别，基于opencv，有可能会误检
+    }
+
+    # 版面识别元素为图片的配置
+    image_config = {
+        # "extract_original_image": True, # 是否提取原始图片（使用 pypdfium2 提取原始图片。截图可能导致清晰度降低和边界丢失，默认关闭）
+        # "extract_original_image_iou_thresh": 0.5, # 是否提取原始图片和版面识别的图片，bbox重叠度，默认0.9
     }
 
 
@@ -124,7 +134,7 @@ def do_parse(
         pdf_dict= all_page_dicts[idx]
         _lang = lang_list[idx]
         _ocr_enable = ocr_enabled_list[idx]
-        middle_json = pipeline_result_to_middle_json(model_list, images_list, pdf_dict, image_writer, _lang, _ocr_enable, p_formula_enable, ocr_config=ocr_config)
+        middle_json = pipeline_result_to_middle_json(model_list, images_list, pdf_dict, image_writer, _lang, _ocr_enable, p_formula_enable, ocr_config=ocr_config, image_config=image_config)
         # 计算总运行时间（单位：秒）
         print(f"运行时间: {time.time() - start_time}秒")
         pdf_info = middle_json["pdf_info"]

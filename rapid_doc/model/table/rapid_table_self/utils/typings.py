@@ -15,6 +15,7 @@ from .vis import VisTable
 class EngineType(Enum):
     ONNXRUNTIME = "onnxruntime"
     TORCH = "torch"
+    DXENGINE = "dxengine"  # ← 커스텀 엔진 추가
 
 
 class ModelType(Enum):
@@ -38,6 +39,7 @@ class RapidTableInput:
 
     use_ocr: bool = True
     ocr_params: dict = field(default_factory=dict)
+    use_async: bool = False  # Async 모드 사용 여부
 
 
 @dataclass

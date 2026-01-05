@@ -310,7 +310,7 @@ def merge_det_boxes(dt_boxes):
     return new_dt_boxes
 
 
-def get_adjusted_mfdetrec_res(single_page_mfdetrec_res, useful_list):
+def get_adjusted_mfdetrec_res(single_page_mfdetrec_res, useful_list, return_text=False):
     paste_x, paste_y, xmin, ymin, xmax, ymax, new_width, new_height = useful_list
     # Adjust the coordinates of the formula area
     adjusted_mfdetrec_res = []
@@ -325,13 +325,27 @@ def get_adjusted_mfdetrec_res(single_page_mfdetrec_res, useful_list):
         if any([x1 < 0, y1 < 0]) or any([x0 > new_width, y0 > new_height]):
             continue
         else:
-            adjusted_mfdetrec_res.append({
-                "bbox": [x0, y0, x1, y1],
-            })
+            return_res = { "bbox": [x0, y0, x1, y1]}
+            if return_text:
+                if mf_res.get('latex'):
+                    return_res["latex"] = mf_res['latex']
+                if mf_res.get('checkbox'):
+                    return_res["checkbox"] = mf_res['checkbox']
+            adjusted_mfdetrec_res.append(return_res)
     return adjusted_mfdetrec_res
 
 
-def get_ocr_result_list(ocr_res, useful_list, ocr_enable, bgr_image, lang):
+def get_ocr_result_list(ocr_res, useful_list, ocr_enable, bgr_image, lang=None):
+    """
+    OCR 결과를 처리하여 결과 리스트 생성
+    
+    Args:
+        ocr_res: OCR 검출 결과
+        useful_list: 유용한 영역 정보
+        ocr_enable: OCR 활성화 여부
+        bgr_image: BGR 이미지
+        lang: 언어 코드 (선택적, OCR 모델은 다국어 지원하므로 실제로는 사용되지 않음)
+    """
     paste_x, paste_y, xmin, ymin, xmax, ymax, new_width, new_height = useful_list
     ocr_result_list = []
     ori_im = bgr_image.copy()

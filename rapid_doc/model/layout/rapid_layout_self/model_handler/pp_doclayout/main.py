@@ -1,5 +1,6 @@
 import time
-from typing import List
+import threading
+from typing import List, Union, Optional, Callable
 
 import numpy as np
 
@@ -9,9 +10,10 @@ from ..base import BaseModelHandler
 from .post_process import PPPostProcess
 from .pre_process import PPPreProcess
 from ..utils import ModelType
+from ...utils.typings import EngineType
 
 class PPDocLayoutModelHandler(BaseModelHandler):
-    def __init__(self, labels, conf_thres, iou_thres, session: InferSession, model_type: ModelType):
+    def __init__(self, labels, conf_thres: Union[float, dict], iou_thres, session: InferSession, model_type: ModelType, engine_type: EngineType):
         if model_type == ModelType.PP_DOCLAYOUT_PLUS_L:
             target_size = (800, 800)
         elif model_type == ModelType.PP_DOCLAYOUT_S:
@@ -20,12 +22,65 @@ class PPDocLayoutModelHandler(BaseModelHandler):
             # PP_DOCLAYOUT_L、PP_DOCLAYOUT_M、RT_DETR_L_WIRED_TABLE_CELL_DET、RT_DETR_L_WIRELESS_TABLE_CELL_DET
             target_size = (640, 640)
         self.img_size = target_size
-        self.pp_preprocess = PPPreProcess(img_size=self.img_size, model_type=model_type)
+
+        if engine_type == EngineType.DXENGINE:
+            labels = [
+                "paragraph_title", "image", "text", "number", "abstract", "content",
+                "figure_title", "formula", "table", "table_title", "reference",
+                "doc_title", "footnote", "header", "algorithm", "footer", "seal",
+                "chart_title", "chart", "formula_number", "header_image",
+                "footer_image", "aside_text"
+            ]
+            conf_thres = {
+                0: 0.3,    # paragraph_title
+                1: 0.5,    # image
+                2: 0.4,    # text
+                3: 0.5,    # number
+                4: 0.5,    # abstract
+                5: 0.5,    # content
+                6: 0.5,    # figure_title
+                7: 0.3,    # formula         
+                8: 0.5,    # table
+                9: 0.5,    # table_title
+                10: 0.5,   # reference
+                11: 0.5,   # doc_title
+                12: 0.5,   # footnote
+                13: 0.5,   # header
+                14: 0.5,   # algorithm
+                15: 0.5,   # footer
+                16: 0.45,  # seal             
+                17: 0.5,   # chart_title
+                18: 0.5,   # chart
+                19: 0.5,   # formula_number
+                20: 0.5,   # header_image
+                21: 0.5,   # footer_image
+                22: 0.5    # aside_text
+            }
+        self.pp_preprocess = PPPreProcess(img_size=self.img_size, model_type=model_type, engine_type=engine_type)
         self.pp_postprocess = PPPostProcess(labels, conf_thres, iou_thres)
 
         self.session = session
+        self.engine_type = engine_type
+        self.model_type = model_type
 
     def __call__(self, ori_img_list: List[np.ndarray]) -> List[RapidLayoutOutput]:
+        """
+        이미지 리스트를 처리하여 레이아웃 분석 결과 반환
+        
+        엔진 타입과 비동기 설정에 따라 처리 방식 자동 선택:
+        - DXEngine + Async: 페이지별 비동기 병렬 처리
+        - 그 외: 기존 배치 처리
+        """
+        # DX Engine + Async 모드인 경우 페이지별 비동기 처리
+        if (self.engine_type == EngineType.DXENGINE and 
+            hasattr(self.session, 'use_async') and 
+            self.session.use_async):
+            return self._process_async(ori_img_list)
+        else:
+            return self._process_sync(ori_img_list)
+    
+    def _process_sync(self, ori_img_list: List[np.ndarray]) -> List[RapidLayoutOutput]:
+        """동기 방식 배치 처리 (기존 방식)"""
         s1 = time.perf_counter()
         # 1、前置处理
         img_inputs = []
@@ -58,6 +113,100 @@ class PPDocLayoutModelHandler(BaseModelHandler):
                                        class_names=class_names, scores=scores, elapse=elapse)
             result_list.append(result)
         return result_list
+    
+    def _process_async(self, ori_img_list: List[np.ndarray]) -> List[RapidLayoutOutput]:
+        """비동기 방식 페이지별 병렬 처리 (DX Engine 전용)"""
+        start_time = time.perf_counter()
+        num_pages = len(ori_img_list)
+        
+        # 결과 저장소
+        results = [None] * num_pages
+        lock = threading.Lock()
+        pending_count = num_pages
+        cv = threading.Condition(lock)
+        page_start_times = {}  # 페이지별 시작 시간
+        
+        def on_complete(outputs, page_idx: int, page_start: float):
+            """단일 페이지 추론 완료 콜백"""
+            nonlocal pending_count
+            try:
+                # 후처리
+                if True:
+                    ori_img = ori_img_list[page_idx]
+                    ori_img_shape = ori_img.shape[:2]
+                    
+                    # outputs는 ONNX 후처리까지 완료된 결과
+                    batch_outputs = self._format_output(outputs)
+                    if batch_outputs:
+                        output = batch_outputs[0]  # 단일 페이지
+                        datas = self.pp_postprocess(output["boxes"], [ori_img_shape[1], ori_img_shape[0]])
+                        if datas:
+                            boxes, scores, class_names = zip(*[(d["coordinate"], d["score"], d["label"]) for d in datas])
+                        else:
+                            boxes, scores, class_names = [], [], []
+                    else:
+                        boxes, scores, class_names = [], [], []
+                    
+                    elapse = time.perf_counter() - page_start
+                    result = RapidLayoutOutput(
+                        img=ori_img, 
+                        boxes=boxes,
+                        class_names=class_names, 
+                        scores=scores, 
+                        elapse=elapse
+                    )
+                    
+                    with lock:
+                        results[page_idx] = result
+                        pending_count -= 1
+                        cv.notify()
+                    
+            except Exception as e:
+                import traceback
+                print(f"Layout async callback error for page {page_idx}: {e}")
+                traceback.print_exc()
+                with lock:
+                    # 에러 발생 시에도 더미 결과 저장
+                    results[page_idx] = RapidLayoutOutput(
+                        img=ori_img_list[page_idx],
+                        boxes=[], class_names=[], scores=[],
+                        elapse=time.perf_counter() - page_start
+                    )
+                    pending_count -= 1
+                    cv.notify()
+        
+        # 모든 페이지를 비동기로 제출
+        request_ids = []
+        
+        for idx, ori_img in enumerate(ori_img_list):
+            page_start = time.perf_counter()
+            page_start_times[idx] = page_start
+            
+            # 전처리
+            ori_img_shape = ori_img.shape[:2]
+            img = self.preprocess(ori_img)
+            scale_factor = np.array([  # [w_scale, h_scale]
+                [self.img_size[0] / ori_img_shape[0],
+                 self.img_size[1] / ori_img_shape[1]]
+            ], dtype=np.float32)
+            
+            # 비동기 추론 제출
+            request_id = self.session.run_async(
+                img, 
+                scale_factor,
+                callback=lambda outputs, page_idx=idx, start=page_start: on_complete(outputs, page_idx, start)
+            )
+            request_ids.append(request_id)
+        
+        # 모든 결과가 완료될 때까지 대기
+        with cv:
+            while pending_count > 0:
+                cv.wait()
+        
+        total_time = time.perf_counter() - start_time
+        # print(f"Layout async processing: {num_pages} pages in {total_time:.3f}s ({total_time/num_pages:.3f}s/page)")
+        
+        return results
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
         return self.pp_preprocess(image)

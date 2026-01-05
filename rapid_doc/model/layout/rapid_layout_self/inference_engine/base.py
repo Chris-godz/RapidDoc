@@ -63,7 +63,12 @@ class InferSession(ABC):
 
 def get_engine(engine_type: EngineType):
     logger.info("Using engine_name: %s", engine_type.value)
+    if engine_type == EngineType.DXENGINE:
 
+        from .dxengine import DXInferSession
+
+        return DXInferSession
+    
     if engine_type == EngineType.ONNXRUNTIME:
         if not import_package(engine_type.value):
             raise ImportError(f"{engine_type.value} is not installed.")

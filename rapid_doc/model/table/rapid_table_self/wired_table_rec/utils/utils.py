@@ -367,6 +367,53 @@ cv2_interp_codes = {
 }
 
 
+def resize_with_padding(img: np.ndarray, target_size: int = 768, pad_color: tuple = (255, 255, 255)):
+    """
+    Aspect ratio를 유지하면서 패딩으로 정사각형으로 만듭니다.
+    
+    Args:
+        img: 입력 이미지 (H, W, C)
+        target_size: 목표 크기 (정사각형)
+        pad_color: 패딩 색상 (B, G, R) - 기본값은 흰색
+        
+    Returns:
+        tuple: (padded_img, scale, pad_top, pad_left, original_h, original_w)
+            - padded_img: 패딩이 추가된 이미지 (target_size, target_size, C)
+            - scale: 리사이즈 비율
+            - pad_top: 위쪽 패딩 크기
+            - pad_left: 왼쪽 패딩 크기
+            - original_h: 원본 이미지 높이
+            - original_w: 원본 이미지 너비
+    """
+    h, w = img.shape[:2]
+    
+    # 긴 쪽을 기준으로 스케일 계산
+    scale = target_size / max(h, w)
+    new_h, new_w = int(h * scale), int(w * scale)
+    
+    # 리사이즈 (축소 시 INTER_AREA, 확대 시 INTER_CUBIC 사용)
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+    resized = cv2.resize(img, (new_w, new_h), interpolation=interpolation)
+    
+    # 패딩 계산 (중앙 정렬)
+    pad_h = target_size - new_h
+    pad_w = target_size - new_w
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+    
+    # 패딩 추가
+    padded = cv2.copyMakeBorder(
+        resized,
+        pad_top, pad_bottom,
+        pad_left, pad_right,
+        cv2.BORDER_CONSTANT,
+        value=pad_color
+    )
+    
+    return padded, scale, pad_top, pad_left, h, w
+
 def resize_img(img, scale, keep_ratio=True):
     if keep_ratio:
         # 缩小使用area更保真

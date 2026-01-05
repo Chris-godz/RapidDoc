@@ -268,8 +268,14 @@ def perform_table_merge(soup1, soup2, previous_table_block, wait_merge_table_foo
 
     # 将第二个表格的行添加到第一个表格中
     if tbody1 and tbody2:
-        soup1_last_row = soup1.find_all("tr")[-1].contents
+        soup1_rows = soup1.find_all("tr")
         rows2 = soup2.find_all("tr")
+        
+        # 빈 테이블 처리 (행이 없는 경우)
+        if not soup1_rows or not rows2:
+            return str(soup1)
+        
+        soup1_last_row = soup1_rows[-1].contents
         # 将第二个表格的行添加到第一个表格中（跳过表头行）
         for row in rows2[header_count:]:
             # 从原来的位置移除行，并添加到第一个表格中

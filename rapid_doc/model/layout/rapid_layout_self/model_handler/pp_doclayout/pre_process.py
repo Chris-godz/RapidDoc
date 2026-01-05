@@ -4,13 +4,16 @@ from typing import Optional, Tuple, Union
 import cv2
 import numpy as np
 from ..utils import ModelType
+from rapid_doc.model.layout.rapid_layout_self.utils.typings import EngineType
 
 InputType = Union[str, np.ndarray, bytes, Path]
 
 
 class PPPreProcess:
-    def __init__(self, img_size: Tuple[int, int], model_type: ModelType):
+    def __init__(self, img_size: Tuple[int, int], model_type: ModelType, engine_type: EngineType = EngineType.ONNXRUNTIME):
         self.size = img_size
+        self.engine_type = engine_type
+
         if model_type.value.endswith("_l"):
             self.mean = np.array([0, 0, 0])
             self.std = np.array([1.0, 1.0, 1.0])
@@ -24,10 +27,12 @@ class PPPreProcess:
             raise ValueError("img is None.")
 
         img = self.resize(img) #Resize
-        img = self.normalize(img) #Normalize
-        img = self.permute(img) #ToCHWImage
+        if self.engine_type != EngineType.DXENGINE:
+            img = self.normalize(img) #Normalize
+            img = self.permute(img) #ToCHWImage
+            img = img.astype(np.float32)
         img = np.expand_dims(img, axis=0) #ToBatch
-        return img.astype(np.float32)
+        return img
 
     def resize(self, img: np.ndarray) -> np.ndarray:
         resize_h, resize_w = self.size
