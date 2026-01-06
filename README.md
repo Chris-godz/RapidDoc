@@ -25,9 +25,9 @@
   
 - **版面识别**
   - 模型使用 `PP-DocLayout` 系列 ONNX 模型（plus-L、L、M、S）
-    - **PP-DocLayout_plus-L**：效果最好，速度稍慢 
-    - **PP-DocLayout-L**：速度快，效果也不错，默认使用  
-    - **PP-DocLayout-S**：速度极快，可能存在部分漏检
+    - **PP-DocLayout_plus-L**：效果最好，速度稍慢，默认使用 
+    - **PP-DocLayout-L**：速度快，效果也不错
+    - **PP-DocLayout-S**：速度极快，存在部分漏检
 
 - **公式识别**
   - 使用 `PP-FormulaNet_plus` 系列 ONNX 模型（L、M、S）
@@ -115,13 +115,12 @@ RapidDoc提供了便捷的docker部署方式，这有助于快速搭建环境并
 - [x] 文本型pdf，表格非OCR文本提取
 - [x] 文本型pdf，使用pypdfium2提取文本框bbox
 - [x] 文本型pdf，支持0/90/270度三个方向的表格解析
-- [ ] 文本型pdf，使用pypdfium2提取原始图片（默认截图会导致清晰度降低和图片边界可能丢失部分）
-- [ ] 表格内公式提取
-- [ ] 表格内图片提取
-- 
-- [ ] 修正文档扭曲/模糊/阴影等情况 RapidUnDistort
-- [ ] 四方向分类旋转表格解析 RapidOrientation
-- [ ] 复选框识别，使用模型
+- [x] 文本型pdf，使用pypdfium2提取原始图片（默认截图会导致清晰度降低和图片边界可能丢失部分）
+- [x] 表格内公式提取
+- [x] 表格内图片提取
+- [ ] 支持 PP-DocLayoutV2 版面识别+阅读顺序
+
+
 - [ ] 公式识别支持gpu
 - [ ] 版面、表格、公式支持openvino
 - [ ] RapidDoc4j（Java版本）
