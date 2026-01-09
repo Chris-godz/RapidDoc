@@ -6,7 +6,7 @@ DX Engine based PDF parsing web interface
 
 Usage:
     source venv/bin/activate
-    source set_env.sh 1 2 1 3 2 4
+    source deepx_scripts/set_env.sh 1 2 1 3 2 4
     python demo/gradio_app.py
 """
 import os
@@ -21,11 +21,11 @@ import gradio as gr
 from loguru import logger
 
 # =============================================================================
-# Environment Setup Check: Verify if set_env.sh has been executed
+# Environment Setup Check: Verify if deepx_scripts/set_env.sh has been executed
 # =============================================================================
 def check_environment_setup():
     """
-    Check if set_env.sh 1 2 1 3 2 4 has been executed
+    Check if deepx_scripts/set_env.sh 1 2 1 3 2 4 has been executed
     Exit with warning if required environment variables are not set
     """
     required_env_vars = {
@@ -47,7 +47,7 @@ def check_environment_setup():
         logger.error("❌ Environment setup is not complete!")
         logger.error("")
         logger.error("Please run the following command first:")
-        logger.error("  $ source set_env.sh 1 2 1 3 2 4")
+        logger.error("  $ source ./deepx_scripts/set_env.sh 1 2 1 3 2 4")
         logger.error("")
         logger.error(f"Missing environment variables: {', '.join(missing_vars)}")
         logger.error("=" * 80)

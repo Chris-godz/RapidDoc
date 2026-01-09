@@ -1,6 +1,6 @@
 # RapidDoc Usage Examples (DeepX)
 
-These examples assume your virtual environment and models/env variables are already set (e.g., `source venv/bin/activate` and, if needed, run `source set_env.sh ...`).
+These examples assume your virtual environment and models/env variables are already set (e.g., `source venv/bin/activate` and, if needed, run `source ./deepx_scripts/set_env.sh ...`).
 
 Prerequisites
 ```shell
@@ -32,5 +32,5 @@ pip install -e .
 - Description: Launches the Gradio-based web UI (default port 7860) for upload/parse/preview.
 
 ## Notes
-- If your environment needs dx-rt inference engine thread tuning, run `set_env.sh` with the appropriate arguments before starting the demos/servers.
+- If your environment needs dx-rt inference engine thread tuning, run `./deepx_scripts/set_env.sh` with the appropriate arguments before starting the demos/servers.
 - Logs and output paths follow each script's internal settings; adjust inside the scripts if you need different locations.

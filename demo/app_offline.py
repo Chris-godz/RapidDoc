@@ -33,10 +33,10 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 # =============================================================================
-# 환경 변수 체크 (set_env.sh 1 2 1 3 2 4 설정 필요)
+# 환경 변수 체크 (deepx_scripts/set_env.sh 1 2 1 3 2 4 설정 필요)
 # =============================================================================
 def check_environment():
-    """Check that set_env.sh 1 2 1 3 2 4 was sourced and required env vars are set."""
+    """Check that deepx_scripts/set_env.sh 1 2 1 3 2 4 was sourced and required env vars are set."""
     required_env_vars = {
         'CUSTOM_INTER_OP_THREADS_COUNT': '1',
         'CUSTOM_INTRA_OP_THREADS_COUNT': '2',
@@ -66,7 +66,7 @@ def check_environment():
             logger.error(f"Variables with unexpected values: {', '.join(incorrect_vars)}")
         logger.error("-" * 80)
         logger.error("Please run the following command and try again:")
-        logger.error("  source ./set_env.sh 1 2 1 3 2 4")
+        logger.error("  source ./deepx_scripts/set_env.sh 1 2 1 3 2 4")
         logger.error("=" * 80)
         logger.error("")
         logger.error("Exiting.")

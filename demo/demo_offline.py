@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 # =============================================================================
-# 환경 변수 체크 (set_env.sh 1 2 1 3 2 4 설정 필요)
+# 환경 변수 체크 (./deepx_scripts/set_env.sh 1 2 1 3 2 4 설정 필요)
 # =============================================================================
 required_env_vars = {
     'CUSTOM_INTER_OP_THREADS_COUNT': '1',
@@ -64,7 +64,7 @@ if missing_vars or incorrect_vars:
         print(f"Variables with unexpected values: {', '.join(incorrect_vars)}")
     print("-" * 80)
     print("Please run the following command and try again:")
-    print("  source ./set_env.sh 1 2 1 3 2 4")
+    print("  source ./deepx_scripts/set_env.sh 1 2 1 3 2 4")
     print("=" * 80)
     import sys
     sys.exit(1)

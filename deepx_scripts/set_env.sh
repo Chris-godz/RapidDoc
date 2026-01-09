@@ -1,7 +1,7 @@
 #!/bin/bash
-# Usage: source ./set_env.sh [CUSTOM_INTER_OP_THREADS_COUNT] [CUSTOM_INTRA_OP_THREADS_COUNT] [DXRT_DYNAMIC_CPU_THREAD] [DXRT_TASK_MAX_LOAD] [NFH_INPUT_WORKER_THREADS] [NFH_OUTPUT_WORKER_THREADS]
-# Example: source ./set_env.sh 1 2 3 4 5 6
-# Use -1 to unset a specific variable: source ./set_env.sh 1 -1 3 4 5 6
+# Usage: source ./deepx_scripts/set_env.sh [CUSTOM_INTER_OP_THREADS_COUNT] [CUSTOM_INTRA_OP_THREADS_COUNT] [DXRT_DYNAMIC_CPU_THREAD] [DXRT_TASK_MAX_LOAD] [NFH_INPUT_WORKER_THREADS] [NFH_OUTPUT_WORKER_THREADS]
+# Example: source ./deepx_scripts/set_env.sh 1 2 3 4 5 6
+# Use -1 to unset a specific variable: source ./deepx_scripts/set_env.sh 1 -1 3 4 5 6
 if [ "$1" = "-1" ]; then
     unset CUSTOM_INTER_OP_THREADS_COUNT
     echo "CUSTOM_INTER_OP_THREADS_COUNT unset"
