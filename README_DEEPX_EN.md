@@ -7,12 +7,15 @@ Prerequisites
 # 1) Activate your venv
 source venv/bin/activate
 
-# 2) Build dx-rt (replace with your path)
+# 2) Download sample models into this repo root
+./setup.sh --force-remove-models
+
+# 3) Build dx-rt (replace with your path)
 cd /path/to/dx-rt
 ./build.sh --clean
 cd -
 
-# 3) Install RapidDoc dependencies and editable package
+# 4) Install RapidDoc dependencies and editable package
 pip install -r requirements.gradio.txt
 pip install -e .
 ```
@@ -28,7 +31,7 @@ pip install -e .
   - Sends sample requests and checks the server responses.
 
 ## 3) Gradio Web UI
-- Command: `python demo/app_gradio.py`
+- Command: `python demo/gradio_app.py`
 - Description: Launches the Gradio-based web UI (default port 7860) for upload/parse/preview.
 
 ## Notes

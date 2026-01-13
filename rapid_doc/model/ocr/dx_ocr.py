@@ -325,6 +325,8 @@ class DxTextDetector:
         """
         start_time = time.time()
         
+        print(f"[OCR Det] run_async called, img_shape={img.shape}")
+        
         if self.use_multi_det_model:
             # Multi-model detection: ratio에 따라 모델 선택
             h, w = img.shape[:2]

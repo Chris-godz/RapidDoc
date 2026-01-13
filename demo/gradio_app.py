@@ -12,12 +12,14 @@ Usage:
 import os
 import sys
 import time
-import tempfile
-import shutil
 from pathlib import Path
 from typing import List, Tuple
 
+os.environ["GRADIO_DEFAULT_LANGUAGE"] = "en"
+os.environ.setdefault("LANG", "en_US.UTF-8")
+os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "false")
 import gradio as gr
+from starlette.middleware.base import BaseHTTPMiddleware
 from loguru import logger
 
 # =============================================================================
@@ -88,21 +90,6 @@ urllib.request.urlopen = _blocked_urllib_urlopen
 urllib.request.urlretrieve = _blocked_urllib_urlretrieve
 # =============================================================================
 
-from rapid_doc.cli.common import convert_pdf_bytes_to_bytes_by_pypdfium2, prepare_env, read_fn
-from rapid_doc.data.data_reader_writer import FileBasedDataWriter
-from rapid_doc.utils.draw_bbox import draw_layout_bbox, draw_span_bbox
-from rapid_doc.utils.enum_class import MakeMode
-from rapid_doc.backend.pipeline.pipeline_analyze import doc_analyze as pipeline_doc_analyze
-from rapid_doc.backend.pipeline.pipeline_middle_json_mkcontent import union_make as pipeline_union_make
-from rapid_doc.backend.pipeline.model_json_to_middle_json import result_to_middle_json as pipeline_result_to_middle_json
-
-from rapidocr import EngineType as OCREngineType
-from rapid_doc.model.layout.rapid_layout_self import ModelType as LayoutModelType
-from rapid_doc.model.layout.rapid_layout_self.utils.typings import EngineType as LayoutEngineType
-from rapid_doc.model.formula.rapid_formula_self import ModelType as FormulaModelType
-from rapid_doc.model.formula.rapid_formula_self.utils.typings import EngineType as FormulaEngineType
-from rapid_doc.model.table.rapid_table_self import ModelType as TableModelType
-
 # Project root directory
 __dir__ = os.path.dirname(os.path.abspath(__file__))
 project_root = Path(__dir__).parent.absolute()
@@ -114,18 +101,22 @@ DEFAULT_OUTPUT_DIR = project_root / "demo" / "output-gradio"
 DEFAULT_OUTPUT_DIR.mkdir(exist_ok=True)
 
 
-def extract_performance_summary(perf_logs: str) -> str:
+def extract_performance_summary(perf_logs: str) -> Tuple[List[List[str]], str]:
     """
-    Extract per-PDF performance statistics from performance logs and return as summary string
+    Extract per-PDF performance statistics and return rows plus total time.
+
+    Returns: (rows, total_time)
+    rows: [[model, engine, time, percentage, items, s_per_it, it_per_s], ...]
+    total_time: string like "27.31s" or ""
     """
     if not perf_logs:
-        return ""
+        return [], ""
     
     # Find Performance Summary section only (not per-PDF statistics)
     lines = perf_logs.split('\n')
     in_summary_section = False
     summary_data = []
-    total_time = None
+    total_time = ""
     
     for line in lines:
         # Detect Performance Summary section (not "Performance by PDF")
@@ -139,35 +130,43 @@ def extract_performance_summary(perf_logs: str) -> str:
         
         if in_summary_section:
             # Extract model performance lines
-            if any(emoji in line for emoji in ['📊', '📐', '📄', '🔍', '📋', '✍️']):
+            # Check if line contains performance data (has | separator and time format)
+            if '|' in line and 's (' in line and 'it/s' in line:
                 # Parse line format: "📊 Layout   [    dxengine] |    3.98s ( 14.6%) |   13it | 0.306 s/it |   3.26 it/s"
                 try:
                     parts = line.split('|')
                     if len(parts) >= 5:
                         # Extract model name and engine
                         model_part = parts[0].strip()
+                        # Remove emoji (first character if it's an emoji)
+                        if model_part and not model_part[0].isalnum():
+                            model_part = model_part[1:].strip()
+                        
                         model_name = model_part.split('[')[0].strip()
+                        
+                        # Skip PDF-Det entries
+                        if 'PDF-Det' in model_name or 'pdf-det' in model_name.lower():
+                            continue
+                        
                         engine = model_part.split('[')[1].split(']')[0].strip() if '[' in model_part else 'N/A'
                         
                         # Extract metrics
                         time_part = parts[1].strip()  # "3.98s ( 14.6%)"
-                        time_match = time_part.split('(')[0].strip()
-                        percentage = time_part.split('(')[1].split(')')[0].strip() if '(' in time_part else 'N/A'
+                        time_match = time_part.split('s')[0].strip()
                         
-                        items = parts[2].strip()  # "13it"
-                        s_per_it = parts[3].strip()  # "0.306 s/it"
-                        it_per_s = parts[4].strip()  # "3.26 it/s"
+                        items = parts[2].strip().split('it')[0].strip()  # "13it"
+                        it_per_s = parts[4].strip().split('it/s')[0].strip()  # "3.26 it/s"
                         
                         summary_data.append({
                             'model': model_name,
                             'engine': engine,
                             'time': time_match,
-                            'percentage': percentage,
                             'items': items,
-                            's_per_it': s_per_it,
                             'it_per_s': it_per_s
                         })
-                except:
+                except Exception as e:
+                    # Log parsing error for debugging
+                    logger.debug(f"Failed to parse performance line: {line}, error: {e}")
                     pass
             
             # Extract total processing time
@@ -179,29 +178,134 @@ def extract_performance_summary(perf_logs: str) -> str:
                     pass
     
     if not summary_data:
-        return ""
-    
-    # Build markdown table
-    table_lines = [
-        "\n" + "=" * 80,
-        "📈 **Performance Summary**",
-        "=" * 80,
-        "",
-        "| Model | Engine | Time | % | Items | s/it | it/s |",
-        "|-------|--------|------|---|-------|------|------|"
-    ]
-    
+        return [], ""
+
+    rows = []
     for data in summary_data:
-        row = f"| {data['model']} | {data['engine']} | {data['time']} | {data['percentage']} | {data['items']} | {data['s_per_it']} | {data['it_per_s']} |"
-        table_lines.append(row)
-    
+        rows.append([
+            data['model'],
+            data['engine'],
+            data['time'],
+            data['items'],
+            data['it_per_s'],
+        ])
+
     if total_time:
-        table_lines.append("")
-        table_lines.append(f"**🔥 Total: {total_time}**")
+        rows.append(["Total", "", total_time, "", ""])
+    return rows, total_time
+
+
+def format_performance_markdown(perf_rows: List[List[str]], display_mode: str = "all") -> str:
+    """
+    Format performance data as a styled markdown card.
     
-    table_lines.append("=" * 80)
+    Args:
+        perf_rows: List of performance data rows
+        display_mode: "all", "time", "items", or "throughput"
+        
+    Returns:
+        Formatted markdown string
+    """
+    if not perf_rows:
+        return "**No performance data available yet.**\n\nRun a parsing task to see performance metrics."
     
-    return '\n'.join(table_lines)
+    md_lines = []
+    
+    # Process each row
+    for row in perf_rows:
+        if len(row) < 5:
+            continue
+            
+        model, engine, time, items, it_per_s = row
+        
+        # Skip Total row
+        if model == "Total":
+            continue
+        
+        # Model performance row with emoji
+        model_emoji = {
+            'Layout': '📊',
+            'OCR-Det': '🔍',
+            'OCR-Rec': '✍️',
+            'Formula': '📐',
+            'Table': '📋'
+        }.get(model, '📄')
+        
+        engine_badge = f"`{engine}`" if engine != 'N/A' else ""
+        
+        # Build metrics based on display mode
+        metrics = []
+        if display_mode in ["all", "time"]:
+            metrics.append(f"⏱️ **{time}s**")
+        if display_mode in ["all", "items"]:
+            metrics.append(f"📦 {items} items")
+        if display_mode in ["all", "throughput"]:
+            metrics.append(f"⚡ **{it_per_s} it/s**")
+        
+        metrics_str = " · ".join(metrics) if metrics else "No metrics selected"
+        
+        md_lines.append(
+            f"**{model_emoji} {model}** {engine_badge}  \n"
+            f"{metrics_str}"
+        )
+    
+    return "\n\n".join(md_lines)
+
+
+def convert_md_images_for_gradio(md_content: str, image_dir: str) -> str:
+    """
+    Convert markdown image paths to base64-encoded data URLs.
+    This is the most reliable way to display images in Gradio Markdown.
+    """
+    import re
+    import base64
+    
+    def replace_image_path(match):
+        img_path = match.group(1)
+        
+        # Determine the actual file path
+        if os.path.isabs(img_path):
+            full_path = img_path
+        else:
+            full_path = os.path.join(image_dir, img_path)
+        
+        # Check if file exists
+        if not os.path.exists(full_path):
+            logger.warning(f"Image not found: {full_path}")
+            return match.group(0)  # Return original if file not found
+        
+        try:
+            # Read image and encode to base64
+            with open(full_path, 'rb') as img_file:
+                img_data = img_file.read()
+                img_base64 = base64.b64encode(img_data).decode('utf-8')
+            
+            # Determine image type from extension
+            ext = os.path.splitext(full_path)[1].lower()
+            mime_types = {
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.png': 'image/png',
+                '.gif': 'image/gif',
+                '.bmp': 'image/bmp',
+                '.webp': 'image/webp'
+            }
+            mime_type = mime_types.get(ext, 'image/jpeg')
+            
+            # Create data URL
+            data_url = f'data:{mime_type};base64,{img_base64}'
+            
+            # Return HTML img tag with base64 data
+            return f'<img src="{data_url}" style="max-width: 100%; height: auto;" />'
+            
+        except Exception as e:
+            logger.error(f"Failed to encode image {full_path}: {e}")
+            return match.group(0)  # Return original on error
+    
+    # Replace markdown images with base64-encoded HTML img tags
+    md_content = re.sub(r'!\[\]\(([^)]+)\)', replace_image_path, md_content)
+    
+    return md_content
 
 
 def get_model_config(
@@ -211,6 +315,13 @@ def get_model_config(
     table_engine: str,
 ):
     """Generate model configuration"""
+    from rapidocr import EngineType as OCREngineType
+    from rapid_doc.model.layout.rapid_layout_self import ModelType as LayoutModelType
+    from rapid_doc.model.layout.rapid_layout_self.utils.typings import EngineType as LayoutEngineType
+    from rapid_doc.model.formula.rapid_formula_self import ModelType as FormulaModelType
+    from rapid_doc.model.formula.rapid_formula_self.utils.typings import EngineType as FormulaEngineType
+    from rapid_doc.model.table.rapid_table_self import ModelType as TableModelType
+
     # Layout configuration
     layout_config = {"model_type": LayoutModelType.PP_DOCLAYOUT_L}
     if layout_engine == "dxengine":
@@ -287,8 +398,24 @@ def get_model_config(
     return layout_config, ocr_config, formula_config, table_config, checkbox_config, image_config
 
 
+def update_engine_settings(preset: str) -> Tuple[str, str, str, str]:
+    """
+    Update individual engine settings based on preset selection.
+    
+    Args:
+        preset: "onnxruntime" or "deepx-npu"
+    
+    Returns:
+        (layout_engine, ocr_engine, formula_engine, table_engine)
+    """
+    if preset == "onnxruntime":
+        return "onnxruntime", "onnxruntime", "onnxruntime", "onnxruntime"
+    else:  # deepx-npu
+        return "dxengine", "dxengine", "onnxruntime", "dxengine"
+
+
 def parse_document(
-    file_path: str,
+    file_paths: List[str],
     parse_method: str,
     formula_enable: bool,
     table_enable: bool,
@@ -297,189 +424,314 @@ def parse_document(
     formula_engine: str,
     table_engine: str,
     use_async_pipeline: bool,
-    start_page: int,
-    end_page: int,
     progress=gr.Progress(),
-) -> Tuple[str, str, str, List[str]]:
+) -> Tuple[str, str, str, List[str], List[List[str]]]:
     """
-    Document parsing function
+    Document parsing function - supports multiple files
     
     Returns:
-        (markdown_content, info_text, layout_pdf_path, image_list)
+        (markdown_content, info_text, layout_pdf_path, image_list, performance_rows)
     """
     try:
-        if not file_path:
-            return "", "❌ Please upload a file.", None, []
+        from rapid_doc.cli.common import convert_pdf_bytes_to_bytes_by_pypdfium2, prepare_env, read_fn
+        from rapid_doc.data.data_reader_writer import FileBasedDataWriter
+        from rapid_doc.utils.draw_bbox import draw_layout_bbox
+        from rapid_doc.utils.enum_class import MakeMode
+        from rapid_doc.backend.pipeline.pipeline_analyze import doc_analyze as pipeline_doc_analyze
+        from rapid_doc.backend.pipeline.pipeline_middle_json_mkcontent import union_make as pipeline_union_make
+        from rapid_doc.backend.pipeline.model_json_to_middle_json import result_to_middle_json as pipeline_result_to_middle_json
 
-        progress(0.1, desc="Preparing configuration...")
+        if not file_paths:
+            return "", "❌ Please upload a file or folder.", None, [], []
+
+        progress(0.05, desc="Scanning files...")
         
-        # File information
-        file_name = Path(file_path).stem
-        file_suffix = Path(file_path).suffix.lower()
-        
-        # Check supported formats
+        # Collect all valid files from the uploaded paths
+        valid_files = []
         pdf_suffixes = [".pdf"]
         image_suffixes = [".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"]
-        if file_suffix not in pdf_suffixes + image_suffixes:
-            return "", f"❌ Unsupported file format: {file_suffix}", None, []
+        supported_suffixes = pdf_suffixes + image_suffixes
+        
+        for file_path in file_paths:
+            path = Path(file_path)
+            if path.is_file():
+                if path.suffix.lower() in supported_suffixes:
+                    valid_files.append(str(path))
+        
+        if not valid_files:
+            return "", "❌ No valid PDF or image files found.", None, [], []
+        
+        logger.info(f"📂 Found {len(valid_files)} file(s) to process")
+        
+        # Process all files
+        all_md_contents = []
+        all_extracted_images = []
+        all_perf_logs = []  # 모든 파일의 성능 로그 수집
+        total_pages_all = 0
+        total_time_all = 0
+        
+        for file_idx, file_path in enumerate(valid_files):
+            progress((0.1 + (file_idx / len(valid_files)) * 0.8), 
+                    desc=f"Processing file {file_idx + 1}/{len(valid_files)}...")
+            
+            # File information
+            file_name = Path(file_path).stem
+            file_suffix = Path(file_path).suffix.lower()
+            
+            logger.info("=" * 80)
+            logger.info(f"📄 Processing [{file_idx + 1}/{len(valid_files)}]: {file_name}{file_suffix}")
+            logger.info("=" * 80)
+            logger.info("=" * 80)
+            logger.info(f"📄 Processing [{file_idx + 1}/{len(valid_files)}]: {file_name}{file_suffix}")
+            logger.info("=" * 80)
+        
+            # Model configuration (only once for first file)
+            if file_idx == 0:
+                layout_config, ocr_config, formula_config, table_config, checkbox_config, image_config = get_model_config(
+                    layout_engine, ocr_engine, formula_engine, table_engine
+                )
+            
+            # Read file
+            pdf_bytes = read_fn(file_path)
+            
+            # Use full document
+            new_pdf_bytes = convert_pdf_bytes_to_bytes_by_pypdfium2(pdf_bytes, 0, None)
 
-        progress(0.2, desc="Configuring models...")
-        
-        # Model configuration
-        layout_config, ocr_config, formula_config, table_config, checkbox_config, image_config = get_model_config(
-            layout_engine, ocr_engine, formula_engine, table_engine
-        )
+            logger.info(f"Formula recognition: {'Enabled' if formula_enable else 'Disabled'}")
+            logger.info(f"Table recognition: {'Enabled' if table_enable else 'Disabled'}")
+            
+            # Model inference with log capture
+            start_time = time.time()
+            
+            # Add handler to capture logs
+            import io
+            log_stream = io.StringIO()
+            log_handler = logger.add(log_stream, format="{message}", level="INFO")
+            
+            infer_results, all_image_lists, all_page_dicts, lang_list, ocr_enabled_list = pipeline_doc_analyze(
+                [new_pdf_bytes],
+                parse_method=parse_method,
+                formula_enable=formula_enable,
+                table_enable=table_enable,
+                layout_config=layout_config,
+                ocr_config=ocr_config,
+                formula_config=formula_config,
+                table_config=table_config,
+                checkbox_config=checkbox_config,
+                use_async_pipeline=use_async_pipeline,
+            )
+            
+            # Remove log handler and extract log content
+            logger.remove(log_handler)
+            perf_logs = log_stream.getvalue()
+            log_stream.close()
+            all_perf_logs.append(perf_logs)
+            
+            # Process results
+            model_list = infer_results[0]
+            images_list = all_image_lists[0]
+            pdf_dict = all_page_dicts[0]
+            _lang = lang_list[0]
+            _ocr_enable = ocr_enabled_list[0]
+            
+            # Set output directory
+            local_image_dir, local_md_dir = prepare_env(str(DEFAULT_OUTPUT_DIR), file_name, parse_method)
+            image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
 
-        progress(0.3, desc="Reading file...")
-        
-        # Read file
-        pdf_bytes = read_fn(file_path)
-        
-        # Process page range
-        end_page_id = end_page if end_page > 0 else None
-        if end_page_id and end_page_id < start_page:
-            return "", "❌ End page must be greater than start page.", None, []
-        
-        new_pdf_bytes = convert_pdf_bytes_to_bytes_by_pypdfium2(pdf_bytes, start_page, end_page_id)
+            # Generate Middle JSON
+            middle_json = pipeline_result_to_middle_json(
+                model_list, images_list, pdf_dict, image_writer, _lang, _ocr_enable,
+                formula_enable, ocr_config=ocr_config, image_config=image_config
+            )
 
-        progress(0.4, desc="Starting document analysis...")
+            pdf_info = middle_json["pdf_info"]
+            
+            # Draw layout bbox
+            layout_pdf_path = os.path.join(local_md_dir, f"{file_name}_layout.pdf")
+            draw_layout_bbox(pdf_info, new_pdf_bytes, local_md_dir, f"{file_name}_layout.pdf")
+            
+            # Generate Markdown
+            md_content = pipeline_union_make(pdf_info, MakeMode.MM_MD, local_image_dir)
+            
+            # Convert image paths to Gradio-compatible format
+            md_content = convert_md_images_for_gradio(md_content, local_image_dir)
+            
+            # Save Markdown
+            md_writer.write_string(f"{file_name}.md", md_content)
+            
+            file_time = time.time() - start_time
+            file_pages = len(images_list)
+            
+            total_time_all += file_time
+            total_pages_all += file_pages
+            
+            # Add separator between files
+            all_md_contents.append(f"## 📄 {file_name}{file_suffix}\n\n")
+            all_md_contents.append(md_content)
+            all_md_contents.append(f"\n\n---\n\n")
+            
+            # Collect extracted images
+            import glob
+            if os.path.exists(local_image_dir):
+                for ext in ['*.png', '*.jpg', '*.jpeg']:
+                    image_files = glob.glob(os.path.join(local_image_dir, ext))
+                    all_extracted_images.extend(sorted(image_files))
+            
+            logger.info(f"✅ [{file_idx + 1}/{len(valid_files)}] Complete: {file_time:.2f}s, {file_pages} pages")
+        
+        progress(0.95, desc="Generating summary...")
+        
+        # Parse and format performance statistics from all logs
+        combined_perf_logs = "\n".join(all_perf_logs)
+        perf_rows, perf_total_time = extract_performance_summary(combined_perf_logs)
+        
+        # Debugging: Check if log is empty
+        if not perf_rows:
+            logger.warning("Failed to parse performance logs.")
+            logger.debug(f"Captured log length: {len(combined_perf_logs)} characters")
+            # Output log sample (first 500 characters)
+            if combined_perf_logs:
+                logger.debug(f"Log sample:\n{combined_perf_logs[:500]}")
+        
+        # Generate combined info text
+        info_text = f"""✅ Batch Parsing Complete!
+
+� Total Files: {len(valid_files)} files
+📊 Total Pages: {total_pages_all} pages
+⏱️ Total Time: {total_time_all:.2f}s
+⚡ Average Speed: {total_time_all/total_pages_all:.3f} s/it | {total_pages_all/total_time_all:.2f} it/s
+
+💾 Output Directory: {DEFAULT_OUTPUT_DIR}
+
+"""
+        
         logger.info("=" * 80)
-        logger.info(f"Parsing started: {file_name}")
-        logger.info(f"Formula recognition: {'Enabled' if formula_enable else 'Disabled'}")
-        logger.info(f"Table recognition: {'Enabled' if table_enable else 'Disabled'}")
-        logger.info(f"Engines: Layout={layout_engine}, OCR={ocr_engine}, Formula={formula_engine}, Table={table_engine}")
+        logger.info(f"🎉 Batch parsing complete: {len(valid_files)} files, {total_pages_all} pages in {total_time_all:.2f}s")
         logger.info("=" * 80)
         
-        # Model inference (capture logger to collect performance statistics)
-        start_time = time.time()
-        
-        # Add handler to capture logs
-        import io
-        log_stream = io.StringIO()
-        log_handler = logger.add(log_stream, format="{message}", level="INFO")
-        
-        infer_results, all_image_lists, all_page_dicts, lang_list, ocr_enabled_list = pipeline_doc_analyze(
-            [new_pdf_bytes],
-            parse_method=parse_method,
-            formula_enable=formula_enable,
-            table_enable=table_enable,
-            layout_config=layout_config,
-            ocr_config=ocr_config,
-            formula_config=formula_config,
-            table_config=table_config,
-            checkbox_config=checkbox_config,
-            use_async_pipeline=use_async_pipeline,
-        )
-        
-        # Remove log handler and extract log content
-        logger.remove(log_handler)
-        perf_logs = log_stream.getvalue()
-        log_stream.close()
-        
-        progress(0.7, desc="Generating results...")
-        
-        # Process results
-        model_list = infer_results[0]
-        images_list = all_image_lists[0]
-        pdf_dict = all_page_dicts[0]
-        _lang = lang_list[0]
-        _ocr_enable = ocr_enabled_list[0]
-        
-        # Set output directory
-        local_image_dir, local_md_dir = prepare_env(str(DEFAULT_OUTPUT_DIR), file_name, parse_method)
-        image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
-
-        # Generate Middle JSON
-        middle_json = pipeline_result_to_middle_json(
-            model_list, images_list, pdf_dict, image_writer, _lang, _ocr_enable,
-            formula_enable, ocr_config=ocr_config, image_config=image_config
-        )
-
-        pdf_info = middle_json["pdf_info"]
-
-        progress(0.85, desc="Visualizing layout...")
-        
-        # Draw layout bbox
-        layout_pdf_path = os.path.join(local_md_dir, f"{file_name}_layout.pdf")
-        draw_layout_bbox(pdf_info, new_pdf_bytes, local_md_dir, f"{file_name}_layout.pdf")
-
-        progress(0.9, desc="Generating Markdown...")
-        
-        # Generate Markdown
-        image_dir = str(os.path.basename(local_image_dir))
-        md_content = pipeline_union_make(pdf_info, MakeMode.MM_MD, image_dir)
-        
-        # Save Markdown
-        md_writer.write_string(f"{file_name}.md", md_content)
-        
-        total_time = time.time() - start_time
-        total_pages = len(images_list)
+        # Combine all markdown
+        combined_md = "".join(all_md_contents)
         
         progress(1.0, desc="Complete!")
         
-        # Parse and format performance statistics
-        perf_summary = extract_performance_summary(perf_logs)
-        
-        # Debugging: Check if log is empty
-        if not perf_summary:
-            logger.warning("Failed to parse performance logs.")
-            logger.debug(f"Captured log length: {len(perf_logs)} characters")
-            # Output log sample (first 500 characters)
-            if perf_logs:
-                logger.debug(f"Log sample:\n{perf_logs[:500]}")
-        
-        # Generate info text
-        info_text = f"""✅ Parsing Complete!
-
-📄 File: {file_name}{file_suffix}
-📊 Pages Processed: {total_pages} pages
-⏱️ Total Time: {total_time:.2f}s
-⚡ Average Speed: {total_time/total_pages:.3f} s/it | {total_pages/total_time:.2f} it/s
-
-💾 Output Directory: {local_md_dir}
-
-{perf_summary if perf_summary else '※ See terminal logs for detailed performance statistics.'}
-"""
-        
-        logger.info(f"Parsing complete: {total_time:.2f}s, {total_pages} pages")
-        
-        # Collect extracted images (for Gradio Gallery)
-        import glob
-        extracted_images = []
-        if os.path.exists(local_image_dir):
-            # Find all image files
-            for ext in ['*.png', '*.jpg', '*.jpeg']:
-                image_files = glob.glob(os.path.join(local_image_dir, ext))
-                extracted_images.extend(sorted(image_files))
-        
-        logger.info(f"Extracted images: {len(extracted_images)}")
-        
-        return md_content, info_text, layout_pdf_path, extracted_images
+        # Return last layout PDF for preview
+        return combined_md, info_text, layout_pdf_path if valid_files else None, all_extracted_images, perf_rows
 
     except Exception as e:
         logger.exception(e)
         error_text = f"❌ Error occurred:\n{str(e)}"
-        return "", error_text, None, []
+        return "", error_text, None, [], []
 
 
 # Create Gradio interface
+async def _set_language_cookie(request, call_next):
+    response = await call_next(request)
+    # Force UI language to English on every response
+    if response is not None:
+        response.set_cookie("language", "en", path="/", max_age=30 * 24 * 3600)
+    return response
+
+
 def create_ui():
-    with gr.Blocks(title="RapidDoc - DX Engine", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("""
-        # 🚀 RapidDoc - Document Parsing (DX Engine)
-        
-        **High-Performance Document Parsing System for Closed Environments**
-        
-        Upload PDF or image files to extract text, tables, formulas, and more.
-        """)
+    custom_css = """
+    #md-preview,
+    #md-preview > div {
+        overflow: auto;
+    }
+
+    #right-pane {
+        max-width: 900px;
+        min-width: 720px;
+    }
+
+    #right-pane .tabitem {
+        max-height: 720px;
+        overflow: auto;
+    }
+    
+    #md-preview img {
+        max-width: 100%;
+        height: auto;
+    }
+    
+    #perf-mode-radio label {
+        font-size: 0.85em !important;
+    }
+    
+    #perf-mode-radio .wrap {
+        gap: 0.3em !important;
+    }
+    """
+
+    with gr.Blocks(
+        title="RapidDoc - DX Engine", 
+        theme=gr.themes.Soft(), 
+        css=custom_css,
+    ) as demo:
+        # Header row with title and performance table side by side
+        with gr.Row():
+            with gr.Column(scale=2):
+                gr.Markdown("""
+                # 🚀 RapidDoc - Document Parsing (DX Engine)
+                
+                **High-Performance Document Parsing System for Closed Environments**
+                
+                Upload PDF or image files to extract text, tables, formulas, and more.
+                
+                """)
+            
+            with gr.Column(scale=2):
+                with gr.Row():
+                    with gr.Column(scale=3):
+                        gr.Markdown("### 📊 Performance Summary")
+                        perf_display = gr.Markdown(
+                            value="**No performance data available yet.**\n\nRun a parsing task to see performance metrics.",
+                            elem_id="perf-summary"
+                        )
+                    
+                    with gr.Column(scale=1):
+                        perf_mode = gr.Radio(
+                            choices=[
+                                ("All", "all"),
+                                ("⏱️ Time", "time"),
+                                ("📦 Items", "items"),
+                                ("⚡ Throughput", "throughput")
+                            ],
+                            value="all",
+                            label="",
+                            container=False,
+                            elem_id="perf-mode-radio"
+                        )
         
         with gr.Row():
             with gr.Column(scale=1):
-                # File upload
+                # File upload - support multiple files
                 file_input = gr.File(
-                    label="📁 File Upload (PDF or Image)",
-                    file_types=[".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"]
+                    label="📁 File Upload (PDF or Image) - Multiple files supported",
+                    file_types=[".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"],
+                    file_count="multiple",
                 )
+                
+                
+                # Engine preset selection
+                with gr.Group():
+                    gr.Markdown("### 🔧 Engine Selection")
+                    engine_preset = gr.Radio(
+                        choices=[
+                            ("⚡ DeepX NPU (Recommended)", "deepx-npu"),
+                            ("ONNX Runtime (CPU)", "onnxruntime")
+                        ],
+                        value="deepx-npu",
+                        label="Engine Preset",
+                        info="onnxruntime: All models use ONNX Runtime | deepx-npu: All models use DX Engine except Formula"
+                    )
+                
+                # Hidden components to store individual engine settings
+                layout_engine = gr.State(value="dxengine")
+                ocr_engine = gr.State(value="dxengine")
+                formula_engine = gr.State(value="onnxruntime")
+                table_engine = gr.State(value="dxengine")
+                
                 
                 # Basic settings
                 with gr.Group():
@@ -490,86 +742,35 @@ def create_ui():
                         label="Parsing Method",
                         info="auto: Auto select | ocr: Force OCR | txt: Text extraction only"
                     )
-                    formula_enable = gr.Checkbox(
-                        value=True,
-                        label="Enable Formula Recognition"
-                    )
-                    table_enable = gr.Checkbox(
-                        value=True,
-                        label="Enable Table Recognition"
-                    )
-                    use_async_pipeline = gr.Checkbox(
-                        value=True,
-                        label="Enable Async Pipeline",
-                        info="Run DX models with async scheduler for higher throughput"
-                    )
+                formula_enable = gr.State(value=True)
+                table_enable = gr.State(value=True)
+                use_async_pipeline = gr.State(value=True)
                 
-                # Page range
-                with gr.Group():
-                    gr.Markdown("### 📄 Page Range")
-                    with gr.Row():
-                        start_page = gr.Number(
-                            value=0,
-                            label="Start Page",
-                            precision=0,
-                            minimum=0
-                        )
-                        end_page = gr.Number(
-                            value=0,
-                            label="End Page (0=All)",
-                            precision=0,
-                            minimum=0
-                        )
-                
-                # Engine settings
-                with gr.Accordion("🔧 Engine Settings", open=False):
-                    layout_engine = gr.Dropdown(
-                        choices=["dxengine", "onnxruntime"],
-                        value="dxengine",
-                        label="Layout Engine"
-                    )
-                    ocr_engine = gr.Dropdown(
-                        choices=["dxengine", "onnxruntime", "paddle"],
-                        value="dxengine",
-                        label="OCR Engine"
-                    )
-                    formula_engine = gr.Dropdown(
-                        choices=["onnxruntime", "dxengine"],
-                        value="onnxruntime",
-                        label="Formula Engine"
-                    )
-                    table_engine = gr.Dropdown(
-                        choices=["dxengine", "onnxruntime"],
-                        value="dxengine",
-                        label="Table Engine"
-                    )
-                
-                # Parse button
                 parse_btn = gr.Button("🚀 Start Parsing", variant="primary", size="lg")
-            
-            with gr.Column(scale=2):
-                # Information output
+
+                # Parsing info under action button
                 with gr.Accordion("ℹ️ Parsing Information", open=True):
                     info_output = gr.Textbox(
-                        label="",
-                        lines=20,
-                        max_lines=50,
+                        label="info box",
+                        lines=13,
+                        max_lines=40,
                         show_copy_button=True
                     )
-                
+            
+            with gr.Column(scale=2, elem_id="right-pane"):
                 # Separate results by tabs
                 with gr.Tabs():
                     with gr.Tab("📖️ Markdown Preview"):
                         md_preview = gr.Markdown(
                             label="Rendered Markdown",
                             value="",
-                            height=600
+                            elem_id="md-preview"
                         )
                     
                     with gr.Tab("📝 Markdown Source"):
                         md_output = gr.Textbox(
                             label="Markdown Text (for copy)",
-                            lines=60,
+                            lines=100,
                             show_copy_button=True
                         )
                     
@@ -587,8 +788,34 @@ def create_ui():
                         )
         
         # Connect events
+        # Update engine settings when preset changes
+        engine_preset.change(
+            fn=update_engine_settings,
+            inputs=[engine_preset],
+            outputs=[layout_engine, ocr_engine, formula_engine, table_engine]
+        )
+        
+        # Store performance rows in state
+        perf_rows_state = gr.State(value=[])
+        
+        def parse_and_display(file_paths, parse_method, formula_enable, table_enable,
+                            layout_engine, ocr_engine, formula_engine, table_engine,
+                            use_async_pipeline, perf_mode, progress=gr.Progress()):
+            """Wrapper to parse document and format performance display"""
+            md_content, info_text, layout_pdf, images, perf_rows = parse_document(
+                file_paths, parse_method, formula_enable, table_enable,
+                layout_engine, ocr_engine, formula_engine, table_engine,
+                use_async_pipeline, progress
+            )
+            perf_md = format_performance_markdown(perf_rows, perf_mode)
+            return md_content, info_text, layout_pdf, images, perf_md, perf_rows
+        
+        def update_perf_display(perf_rows, perf_mode):
+            """Update performance display when mode changes"""
+            return format_performance_markdown(perf_rows, perf_mode)
+        
         parse_btn.click(
-            fn=parse_document,
+            fn=parse_and_display,
             inputs=[
                 file_input,
                 parse_method,
@@ -599,14 +826,20 @@ def create_ui():
                 formula_engine,
                 table_engine,
                 use_async_pipeline,
-                start_page,
-                end_page,
+                perf_mode,
             ],
-            outputs=[md_output, info_output, layout_output, image_gallery]
+            outputs=[md_output, info_output, layout_output, image_gallery, perf_display, perf_rows_state]
         ).then(
-            fn=lambda md: md,  # Pass the same markdown to preview
+            fn=lambda md: md,
             inputs=[md_output],
             outputs=[md_preview]
+        )
+        
+        # Update performance display when mode changes
+        perf_mode.change(
+            fn=update_perf_display,
+            inputs=[perf_rows_state, perf_mode],
+            outputs=[perf_display]
         )
         
     
@@ -621,9 +854,18 @@ if __name__ == "__main__":
     logger.info("=" * 80)
     
     demo = create_ui()
+    demo.app.add_middleware(BaseHTTPMiddleware, dispatch=_set_language_cookie)
+    
+    # Allow access to output directory and all subdirectories
+    allowed_paths_list = [
+        str(DEFAULT_OUTPUT_DIR),
+        str(DEFAULT_OUTPUT_DIR.absolute()),
+    ]
+    
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
-        show_error=True
+        show_error=True,
+        allowed_paths=allowed_paths_list
     )

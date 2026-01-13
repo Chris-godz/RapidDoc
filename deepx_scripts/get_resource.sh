@@ -10,6 +10,7 @@ OUTPUT_DIR=""
 SYMLINK_TARGET_PATH=""
 USE_FORCE=0
 USE_EXTRACT=0
+SKIP_SYMLINK=0
 
 # color env settings
 source "${SCRIPT_DIR}/color_env.sh"
@@ -183,23 +184,35 @@ generate_output() {
         print_colored "archive file downloaded path($ARCHIVE_TARGET_PATH) is already exist. so, skip to move downloaded file to output path"
         print_colored_v2 "INFO" "=== MOVE SKIP ==="
     else
-        print_colored "Move $DOWNLOAD_PATH to $ARCHIVE_TARGET_PATH"
-        mkdir -p "$ARCHIVE_TARGET_DIR" || exit_with_message "Failed to create directory '$ARCHIVE_TARGET_DIR'. Check permissions."
-        mv "$DOWNLOAD_PATH" "$ARCHIVE_TARGET_PATH"
-        # failed check
-        if [ $? -ne 0 ]; then
-            rm -rf "$DOWNLOAD_PATH"
-            rm -rf "$ARCHIVE_TARGET_PATH"
-            exit_with_message "${ACTION_TYPE} failed! Failed to move file to '$ARCHIVE_TARGET_PATH'. Check permissions."
+        local DOWNLOAD_REAL=$(readlink -f "$DOWNLOAD_PATH")
+        local ARCHIVE_REAL=$(readlink -f "$ARCHIVE_TARGET_PATH")
+
+        if [ "$DOWNLOAD_REAL" == "$ARCHIVE_REAL" ]; then
+            print_colored "Download path and archive target are same ($DOWNLOAD_REAL); skip move" "WARNING"
+        else
+            print_colored "Move $DOWNLOAD_PATH to $ARCHIVE_TARGET_PATH"
+            mkdir -p "$ARCHIVE_TARGET_DIR" || exit_with_message "Failed to create directory '$ARCHIVE_TARGET_DIR'. Check permissions."
+            mv "$DOWNLOAD_PATH" "$ARCHIVE_TARGET_PATH"
+            # failed check
+            if [ $? -ne 0 ]; then
+                rm -rf "$DOWNLOAD_PATH"
+                rm -rf "$ARCHIVE_TARGET_PATH"
+                exit_with_message "${ACTION_TYPE} failed! Failed to move file to '$ARCHIVE_TARGET_PATH'. Check permissions."
+            fi
         fi
-        ln -s "$(readlink -f "$ARCHIVE_TARGET_PATH")" "$(readlink -f "$DOWNLOAD_PATH")"
-        # failed check
-        if [ $? -ne 0 ]; then
-            rm -rf "$DOWNLOAD_PATH"
-            rm -rf "$ARCHIVE_TARGET_PATH"
-            exit_with_message "${ACTION_TYPE} failed! Failed to create symlink. Check permissions."
+
+        if [ "$DOWNLOAD_REAL" == "$ARCHIVE_REAL" ]; then
+            print_colored "Skip creating symlink because download and archive paths are identical" "WARNING"
+        else
+            ln -s "$(readlink -f "$ARCHIVE_TARGET_PATH")" "$(readlink -f "$DOWNLOAD_PATH")"
+            # failed check
+            if [ $? -ne 0 ]; then
+                rm -rf "$DOWNLOAD_PATH"
+                rm -rf "$ARCHIVE_TARGET_PATH"
+                exit_with_message "${ACTION_TYPE} failed! Failed to create symlink. Check permissions."
+            fi
+            print_colored_v2 "GREEN" "[OK] === MAKE SYMLINK SUCC ==="
         fi
-        print_colored_v2 "GREEN" "[OK] === MAKE SYMLINK SUCC ==="
     fi
 
     # extract tar.gz or move tar.gz
@@ -238,6 +251,12 @@ generate_output() {
 
 make_symlink() {
     print_colored_v2 "INFO" "=== Make Symbolic Link Start ==="
+
+    if [ "$SKIP_SYMLINK" -eq 1 ]; then
+        print_colored "Skip symlink because output directory is current directory." "WARNING"
+        print_colored_v2 "GREEN" "[OK] === Make Symbolic Link Complete ==="
+        return 0
+    fi
     URL="${BASE_URL}${SOURCE_PATH}"
     FILENAME=$(basename "$URL")
 
@@ -299,7 +318,8 @@ for i in "$@"; do
             OUTPUT_REAL_DIR=$(readlink -f "$OUTPUT_DIR")
             CURRENT_REAL_DIR=$(readlink -f "./")
             if [ "$OUTPUT_REAL_DIR" == "$CURRENT_REAL_DIR" ]; then
-                exit_with_message "'--output' is the same as the current directory. Please specify a different directory."
+                print_colored "'--output' is the current directory. Symlink creation will be skipped to avoid removing '.'" "WARNING"
+                SKIP_SYMLINK=1
             fi
             ;;
         --extract)

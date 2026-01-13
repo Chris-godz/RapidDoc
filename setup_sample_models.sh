@@ -14,12 +14,16 @@ OUTPUT_DIR="$SCRIPT_DIR"
 SYMLINK_TARGET_PATH=""
 SYMLINK_ARGS=""
 FORCE_ARGS=""
+CUSTOM_SOURCE_PATH=""
 
 # Function to display help message
 show_help() {
   
   echo "Usage: $(basename "$0") [OPTIONS]"
   echo "Options:"
+    echo "  [--output=<dir>]            Output directory (default: RapidDoc root)"
+    echo "  [--symlink_target_path=<d>] Optional symlink target path"
+    echo "  [--src_path=<path>]         Download only the given source path instead of defaults"
   echo "  [--force]                  Force overwrite if the file already exists"
   echo "  [--help]                   Show this help message"
 
@@ -32,30 +36,39 @@ show_help() {
 
 main() {
     SCRIPT_DIR=$(realpath "$(dirname "$0")")
-    GET_RES_CMD="$SCRIPT_DIR/deepx_scripts/get_resource.sh --src_path=$SOURCE_PATH --output=$OUTPUT_DIR $SYMLINK_ARGS $FORCE_ARGS --extract"
+    local sources=()
+    if [ -n "$CUSTOM_SOURCE_PATH" ]; then
+        sources=("$CUSTOM_SOURCE_PATH")
+    else
+        sources=("$DXNN_SOURCE_PATH" "$ONNX_SOURCE_PATH")
+    fi
+
     echo "Get Resources from remote server ..."
-    echo "$GET_RES_CMD"
+    for SOURCE_PATH in "${sources[@]}"; do
+        local get_res_cmd="bash $SCRIPT_DIR/deepx_scripts/get_resource.sh --src_path=$SOURCE_PATH --output=$OUTPUT_DIR $SYMLINK_ARGS $FORCE_ARGS --extract"
+        echo "$get_res_cmd"
 
-    $GET_RES_CMD || {
-        local error_msg="Get resource failed!"
-        local hint_msg="If the issue persists, please try again with sudo and the --force option, like this: 'sudo ./setup_sample_models.sh --force'."
-        local origin_cmd="" # no need to run origin command
-        local suggested_action_cmd="sudo $GET_RES_CMD --force"
+        $get_res_cmd || {
+            local error_msg="Get resource failed!"
+            local hint_msg="If the issue persists, please try again with sudo and the --force option, like this: 'sudo ./setup_sample_models.sh --force'."
+            local origin_cmd="" # no need to run origin command
+            local suggested_action_cmd="sudo $get_res_cmd --force"
 
-        # handle_cmd_failure function arguments
-        #   - local error_message=$1
-        #   - local hint_message=$2
-        #   - local origin_cmd=$3
-        #   - local suggested_action_cmd=$4
-        handle_cmd_failure "$error_msg" "$hint_msg" "$origin_cmd" "$suggested_action_cmd"
-    }
+            # handle_cmd_failure function arguments
+            #   - local error_message=$1
+            #   - local hint_message=$2
+            #   - local origin_cmd=$3
+            #   - local suggested_action_cmd=$4
+            handle_cmd_failure "$error_msg" "$hint_msg" "$origin_cmd" "$suggested_action_cmd"
+        }
+    done
 }
 
 # parse args
 for i in "$@"; do
     case "$1" in
         --src_path=*)
-            SOURCE_PATH="${1#*=}"
+            CUSTOM_SOURCE_PATH="${1#*=}"
             ;;
         --output=*)
             OUTPUT_DIR="${1#*=}"
@@ -64,7 +77,7 @@ for i in "$@"; do
             OUTPUT_REAL_DIR=$(readlink -f "$OUTPUT_DIR")
             CURRENT_REAL_DIR=$(readlink -f "./")
             if [ "$OUTPUT_REAL_DIR" == "$CURRENT_REAL_DIR" ]; then
-                echo "'--output' is the same as the current directory. Please specify a different directory."
+                echo "'--output' points to the current directory. Symlink creation will be skipped."
             fi
             ;;
         --symlink_target_path=*)

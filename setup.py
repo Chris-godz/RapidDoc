@@ -1,6 +1,14 @@
 from pathlib import Path
 from setuptools import setup, find_packages
-from rapid_doc.version import __version__
+
+
+def get_version():
+    version_file = Path(__file__).parent / "rapid_doc" / "version.py"
+    with open(version_file, encoding='utf-8') as f:
+        for line in f:
+            if line.startswith('__version__'):
+                return line.split('=')[1].strip().strip('"').strip("'")
+    return "0.0.0"
 
 
 def parse_requirements(filename):
@@ -25,7 +33,7 @@ if __name__ == '__main__':
         long_description = file.read()
     setup(
         name="rapid_doc",  # 项目名
-        version=__version__,  # 自动从tag中获取版本号
+        version=get_version(),  # 自动从tag中获取版本号
         license="Apache 2.0",
         author='hzkitty',  # 作者名
         author_email='zhzkitty@163.com',  # 作者邮箱

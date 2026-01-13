@@ -119,6 +119,12 @@ class PPDocLayoutModelHandler(BaseModelHandler):
         start_time = time.perf_counter()
         num_pages = len(ori_img_list)
         
+        # 디버깅: 현재 처리할 페이지 수 출력
+        print(f"[Layout Async] Starting new batch: {num_pages} pages")
+        
+        # 이미지 리스트를 로컬 복사하여 클로저 문제 방지
+        local_img_list = list(ori_img_list)
+        
         # 결과 저장소
         results = [None] * num_pages
         lock = threading.Lock()
@@ -126,40 +132,45 @@ class PPDocLayoutModelHandler(BaseModelHandler):
         cv = threading.Condition(lock)
         page_start_times = {}  # 페이지별 시작 시간
         
-        def on_complete(outputs, page_idx: int, page_start: float):
-            """단일 페이지 추론 완료 콜백"""
+        def on_complete(page_idx: int, page_start: float, ori_img: np.ndarray, total_pages: int, outputs, unique_id=None):
+            """단일 페이지 추론 완료 콜백 - outputs는 run_async가 전달"""
             nonlocal pending_count
             try:
+                # 디버깅: 페이지 인덱스와 전체 페이지 수 확인
+                print(f"[Layout Callback] page_idx={page_idx}, total_pages={total_pages}, img_shape={ori_img.shape}")
+                
+                if page_idx >= total_pages:
+                    print(f"[Layout] ERROR: page_idx={page_idx} >= total_pages={total_pages}")
+                    raise IndexError(f"page_idx {page_idx} out of range for {total_pages} pages")
+                
                 # 후처리
-                if True:
-                    ori_img = ori_img_list[page_idx]
-                    ori_img_shape = ori_img.shape[:2]
-                    
-                    # outputs는 ONNX 후처리까지 완료된 결과
-                    batch_outputs = self._format_output(outputs)
-                    if batch_outputs:
-                        output = batch_outputs[0]  # 단일 페이지
-                        datas = self.pp_postprocess(output["boxes"], [ori_img_shape[1], ori_img_shape[0]])
-                        if datas:
-                            boxes, scores, class_names = zip(*[(d["coordinate"], d["score"], d["label"]) for d in datas])
-                        else:
-                            boxes, scores, class_names = [], [], []
+                ori_img_shape = ori_img.shape[:2]
+                
+                # outputs는 ONNX 후처리까지 완료된 결과
+                batch_outputs = self._format_output(outputs)
+                if batch_outputs:
+                    output = batch_outputs[0]  # 단일 페이지
+                    datas = self.pp_postprocess(output["boxes"], [ori_img_shape[1], ori_img_shape[0]])
+                    if datas:
+                        boxes, scores, class_names = zip(*[(d["coordinate"], d["score"], d["label"]) for d in datas])
                     else:
                         boxes, scores, class_names = [], [], []
-                    
-                    elapse = time.perf_counter() - page_start
-                    result = RapidLayoutOutput(
-                        img=ori_img, 
-                        boxes=boxes,
-                        class_names=class_names, 
-                        scores=scores, 
-                        elapse=elapse
-                    )
-                    
-                    with lock:
-                        results[page_idx] = result
-                        pending_count -= 1
-                        cv.notify()
+                else:
+                    boxes, scores, class_names = [], [], []
+                
+                elapse = time.perf_counter() - page_start
+                result = RapidLayoutOutput(
+                    img=ori_img, 
+                    boxes=boxes,
+                    class_names=class_names, 
+                    scores=scores, 
+                    elapse=elapse
+                )
+                
+                with lock:
+                    results[page_idx] = result
+                    pending_count -= 1
+                    cv.notify()
                     
             except Exception as e:
                 import traceback
@@ -168,33 +179,40 @@ class PPDocLayoutModelHandler(BaseModelHandler):
                 with lock:
                     # 에러 발생 시에도 더미 결과 저장
                     results[page_idx] = RapidLayoutOutput(
-                        img=ori_img_list[page_idx],
+                        img=ori_img,
                         boxes=[], class_names=[], scores=[],
                         elapse=time.perf_counter() - page_start
                     )
                     pending_count -= 1
                     cv.notify()
         
+        def create_callback(page_idx: int, page_start: float, ori_img: np.ndarray, total_pages: int):
+            """각 페이지별 콜백 래퍼 생성 - 클로저 안전하게 캡처"""
+            def callback_wrapper(outputs, unique_id=None):
+                return on_complete(page_idx, page_start, ori_img, total_pages, outputs, unique_id)
+            return callback_wrapper
+        
         # 모든 페이지를 비동기로 제출
         request_ids = []
         
-        for idx, ori_img in enumerate(ori_img_list):
+        for idx, ori_img in enumerate(local_img_list):
             page_start = time.perf_counter()
             page_start_times[idx] = page_start
-            
+            # 디버깅: 제출할 페이지 정보
+            print(f"[Layout Submit] page_idx={idx}/{num_pages}, img_shape={ori_img.shape}")
             # 전처리
             ori_img_shape = ori_img.shape[:2]
             img = self.preprocess(ori_img)
-            scale_factor = np.array([  # [w_scale, h_scale]
+            scale_factor = np.array([
                 [self.img_size[0] / ori_img_shape[0],
                  self.img_size[1] / ori_img_shape[1]]
             ], dtype=np.float32)
-            
-            # 비동기 추론 제출
+            # 래퍼 함수로 콜백 생성 - 각 페이지의 인자를 안전하게 캡처
+            cb = create_callback(idx, page_start, ori_img, num_pages)
             request_id = self.session.run_async(
-                img, 
+                img,
                 scale_factor,
-                callback=lambda outputs, page_idx=idx, start=page_start: on_complete(outputs, page_idx, start)
+                callback=cb
             )
             request_ids.append(request_id)
         

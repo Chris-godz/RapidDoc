@@ -77,6 +77,8 @@ print_colored "=== DOCKER_VOLUME_PATH($DOCKER_VOLUME_PATH) is set ===" "INFO"
 setup_assets() {
     MODEL_PATH=./
     CONTAINER_MODE=false
+    DXNN_MODEL_DIR="$MODEL_PATH/dxnn_models"
+    ONNX_MODEL_DIR="$MODEL_PATH/onnx_models"
 
     # Check if running in a container
     if grep -qE "/docker|/lxc|/containerd" /proc/1/cgroup || [ -f /.dockerenv ]; then
@@ -91,18 +93,28 @@ setup_assets() {
         SETUP_MODEL_ARGS="--output=${MODEL_PATH} --symlink_target_path=${DOCKER_VOLUME_PATH}/res/models"
     else
         print_colored "(host mode detected)" "INFO"
-        SETUP_MODEL_ARGS="--output=${MODEL_PATH} --symlink_target_path=${DX_AS_PATH}/workspace/res/models"
+        SETUP_MODEL_ARGS="--output=${MODEL_PATH}"
     fi
 
     print_colored " MODEL_PATH: ${MODEL_PATH}" "INFO"
     MODEL_REAL_PATH=$(readlink -f "$MODEL_PATH")
+    # Determine whether model payloads exist
+    NEED_SETUP=0
+    if [ ! -d "$DXNN_MODEL_DIR" ] || [ ! -d "$ONNX_MODEL_DIR" ]; then
+        NEED_SETUP=1
+    fi
+
+    if [ $FORCE_REMOVE_MODELS -eq 1 ]; then
+        FORCE_ARGS="--force"
+        NEED_SETUP=1
+        print_colored " --force-remove-models set; removing existing model directories" "INFO"
+        rm -rf "$DXNN_MODEL_DIR" "$ONNX_MODEL_DIR"
+    fi
+
     # Check and set up models
-    if [ ! -d "$MODEL_REAL_PATH" ] || [ "$FORCE_ARGS" != "" ]; then
-        if [ $FORCE_REMOVE_MODELS -eq 1 ]; then
-            FORCE_ARGS="--force"
-        fi
-        print_colored " models directory not found. Running setup models script... ($MODEL_REAL_PATH)" "INFO"
-        ./setup_sample_models.sh $SETUP_MODEL_ARGS $FORCE_ARGS || { print_colored "Setup models script failed." "ERROR"; rm -rf $MODEL_PATH; exit 1; }
+    if [ $NEED_SETUP -eq 1 ] || [ "$FORCE_ARGS" != "" ]; then
+        print_colored " models payload missing; running setup models script..." "INFO"
+        ./setup_sample_models.sh $SETUP_MODEL_ARGS $FORCE_ARGS || { print_colored "Setup models script failed." "ERROR"; rm -rf "$DXNN_MODEL_DIR" "$ONNX_MODEL_DIR"; exit 1; }
     else
         print_colored " models directory found. ($MODEL_REAL_PATH)" "INFO"
     fi
