@@ -341,7 +341,7 @@ def doc_analyze(
         
         logger.info("=" * 80)
 
-    return infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled_list
+    return infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled_list, all_pdf_perf_stats
 
 
 def batch_image_analyze(

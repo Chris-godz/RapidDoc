@@ -508,7 +508,7 @@ def parse_document(
             log_stream = io.StringIO()
             log_handler = logger.add(log_stream, format="{message}", level="INFO")
             
-            infer_results, all_image_lists, all_page_dicts, lang_list, ocr_enabled_list = pipeline_doc_analyze(
+            infer_results, all_image_lists, all_page_dicts, lang_list, ocr_enabled_list, *_ = pipeline_doc_analyze(
                 [new_pdf_bytes],
                 parse_method=parse_method,
                 formula_enable=formula_enable,

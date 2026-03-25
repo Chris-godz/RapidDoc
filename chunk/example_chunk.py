@@ -23,7 +23,7 @@ def do_parse(path_list, output_dir):
     for idx, pdf_bytes in enumerate(pdf_bytes_list):
         new_pdf_bytes = convert_pdf_bytes_to_bytes_by_pypdfium2(pdf_bytes)
         pdf_bytes_list[idx] = new_pdf_bytes
-    infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled_list = pipeline_doc_analyze(pdf_bytes_list)
+    infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled_list, *_ = pipeline_doc_analyze(pdf_bytes_list)
 
     result_list = []
     for idx, model_list in enumerate(infer_results):

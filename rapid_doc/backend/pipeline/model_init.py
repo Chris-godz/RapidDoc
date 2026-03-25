@@ -5,7 +5,7 @@ from loguru import logger
 from .model_list import AtomicModel
 from ...model.layout.rapid_layout import RapidLayoutModel
 from ...model.formula.rapid_formula_model import RapidFormulaModel
-from ...model.ocr.rapid_ocr import RapidOcrModel
+# RapidOcrModel은 실제 사용 시점에 lazy import (rapidocr 패키지 버전 의존 문제 방지)
 from ...model.ocr.dx_ocr import DxOcrModel
 from ...model.table.rapid_table import RapidTableModel
 from ...utils.hash_utils import make_hashable
@@ -63,7 +63,10 @@ def ocr_model_init(det_db_box_thresh=0.3, ocr_config=None, det_db_unclip_ratio=1
     else:
         # 기존 RapidOCR 사용 - DX Engine 전용 설정 제거
         logger.info("Using RapidOCR (ONNX Runtime/OpenVINO/Torch/Paddle)")
-        
+        # Lazy import: rapidocr 패키지 버전에 따라 내부 서브모듈 구조가 달라질 수 있으므로
+        # dxengine을 쓰지 않을 때만 로드한다.
+        from ...model.ocr.rapid_ocr import RapidOcrModel  # noqa: PLC0415
+
         # DX Engine 전용 키 필터링
         dx_only_keys = [
             'use_multi_det_model', 'use_multi_rec_model',

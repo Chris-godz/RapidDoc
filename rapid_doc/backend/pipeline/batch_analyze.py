@@ -39,6 +39,7 @@ class BatchAnalyze:
                 checkbox_config=None):
         self.batch_ratio = batch_ratio
         self.formula_enable = get_formula_enable(formula_enable)
+        self.formula_rec_enable = formula_config.get("formula_rec_enable", True) if formula_config else True
         self.formula_level = formula_config.get("formula_level", 0) if formula_config else 0
         self.table_enable = get_table_enable(table_enable)
         self.table_force_ocr = table_config.get("force_ocr", False) if table_config else False
@@ -233,7 +234,7 @@ class BatchAnalyze:
         # =====================================================================
         # Performance measurement: Formula model
         # =====================================================================
-        if self.formula_enable and len(latex_res_list_all_page) > 0:
+        if self.formula_enable and self.formula_rec_enable and len(latex_res_list_all_page) > 0:
             formula_start = time.perf_counter()
             # Formula detection
             latex_imgs = [d['latex_img'] for d in latex_res_list_all_page]
@@ -261,6 +262,8 @@ class BatchAnalyze:
                        f"{len(latex_imgs)}it (success: {formula_success_count}, fail: {len(latex_imgs) - formula_success_count}) | "
                        f"{formula_time/max(len(latex_imgs), 1):.3f} s/it | "
                        f"{len(latex_imgs)/max(formula_time, 0.001):.2f} it/s")
+        elif self.formula_enable and not self.formula_rec_enable:
+            logger.info("📐 [Formula] formula_rec_enable=False; kept as image")
         elif self.formula_enable:
             logger.info("📐 [Formula] No formulas to process; skipped")
         # =====================================================================

@@ -120,7 +120,7 @@ def do_parse(
         pdf_bytes_list[idx] = new_pdf_bytes
     # 记录开始时间
     start_time = time.time()
-    infer_results, all_image_lists, all_page_dicts, lang_list, ocr_enabled_list = pipeline_doc_analyze(pdf_bytes_list, parse_method=parse_method, formula_enable=p_formula_enable,table_enable=p_table_enable,
+    infer_results, all_image_lists, all_page_dicts, lang_list, ocr_enabled_list, *_ = pipeline_doc_analyze(pdf_bytes_list, parse_method=parse_method, formula_enable=p_formula_enable,table_enable=p_table_enable,
                                                                                                      layout_config=layout_config, ocr_config=ocr_config, formula_config=formula_config, table_config=table_config, checkbox_config=checkbox_config)
 
     for idx, model_list in enumerate(infer_results):

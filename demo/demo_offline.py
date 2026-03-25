@@ -126,6 +126,7 @@ def do_parse(
     ocr_engine="dxengine",  # "onnxruntime", "dxengine", "openvino", "torch", "paddle"
     formula_engine="onnxruntime",  # "onnxruntime", "dxengine", "openvino"
     table_engine="dxengine",  # "onnxruntime", "torch"
+    formula_rec_enable=True,  # False: skip ONNX formula inference, keep regions as images
     f_draw_layout_bbox=True,  # Whether to draw layout bounding boxes
     f_draw_span_bbox=True,  # Whether to draw span bounding boxes
     f_dump_md=True,  # Whether to dump markdown files
@@ -221,6 +222,8 @@ def do_parse(
     formula_config = {
         "model_type": FormulaModelType.PP_FORMULANET_PLUS_M,
     }
+    if not formula_rec_enable:
+        formula_config["formula_rec_enable"] = False
     
     # Engine-specific Formula settings
     if formula_engine.lower() == "dxengine":
@@ -288,7 +291,7 @@ def do_parse(
     logger.info("Model inference started")
     start_time = time.time()
     
-    infer_results, all_image_lists, all_page_dicts, lang_list, ocr_enabled_list = pipeline_doc_analyze(
+    infer_results, all_image_lists, all_page_dicts, lang_list, ocr_enabled_list, *_ = pipeline_doc_analyze(
         pdf_bytes_list, 
         parse_method=parse_method, 
         formula_enable=formula_enable,
@@ -383,6 +386,7 @@ def parse_doc(
         formula_engine="onnxruntime",
         table_engine="dxengine",
         use_async_pipeline=True,
+        formula_rec_enable=True,
 ):
     """
         Parameter description:
@@ -419,6 +423,7 @@ def parse_doc(
             ocr_engine=ocr_engine,
             formula_engine=formula_engine,
             table_engine=table_engine,
+            formula_rec_enable=formula_rec_enable,
             use_async_pipeline=use_async_pipeline,
         )
     except Exception as e:
@@ -441,6 +446,7 @@ if __name__ == '__main__':
     # 모델 활성화 설정
     # =========================================================================
     FORMULA_ENABLE = True   # 수식 인식 모델 사용 여부 (True/False)
+    FORMULA_REC_ENABLE = True  # False: ONNX 추론 건너뛰고 수식 영역을 이미지로 유지
     TABLE_ENABLE = True     # 표 인식 모델 사용 여부 (True/False) - UNET 모델 사용 (paddle_cls 불필요)
     
     # =========================================================================
@@ -491,7 +497,8 @@ if __name__ == '__main__':
 
     logger.info("=" * 80)
     logger.info(f"Running in closed-network mode: processing {len(doc_path_list)} files")
-    logger.info(f"Formula recognition: {'enabled' if FORMULA_ENABLE else 'disabled'}")
+    logger.info(f"Formula recognition: {'enabled' if FORMULA_ENABLE else 'disabled'}"
+                + ("" if FORMULA_REC_ENABLE else " (rec disabled — image only)"))
     logger.info(f"Table recognition: {'enabled' if TABLE_ENABLE else 'disabled'}")
     logger.info(f"Sync / Async mode: {'async' if args.use_async else 'sync'}")
     logger.info("-" * 80)
@@ -511,5 +518,6 @@ if __name__ == '__main__':
         ocr_engine=OCR_ENGINE,
         formula_engine=FORMULA_ENGINE,
         table_engine=TABLE_ENGINE,
+        formula_rec_enable=FORMULA_REC_ENABLE,
         use_async_pipeline=args.use_async,
     )

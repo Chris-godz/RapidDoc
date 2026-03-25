@@ -189,7 +189,7 @@ def _process_pipeline(
     from rapid_doc.backend.pipeline.model_json_to_middle_json import result_to_middle_json as pipeline_result_to_middle_json
     from rapid_doc.backend.pipeline.pipeline_analyze import doc_analyze as pipeline_doc_analyze
 
-    infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled_list = (
+    infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled_list, *_ = (
         pipeline_doc_analyze(
             pdf_bytes_list, p_lang_list, parse_method=parse_method,
             formula_enable=p_formula_enable, table_enable=p_table_enable,
