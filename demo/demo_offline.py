@@ -434,7 +434,27 @@ if __name__ == '__main__':
     # =========================================================================
     # CLI 인자 파싱
     # =========================================================================
-    parser = argparse.ArgumentParser(description='RapidDoc PDF Parser - Offline Mode')
+    parser = argparse.ArgumentParser(
+        description='RapidDoc PDF Parser - Offline Mode',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  # demo/pdfs/ 기본 디렉토리 사용
+  python demo/demo_offline.py --finegrained
+
+  # 특정 디렉토리의 모든 PDF
+  python demo/demo_offline.py /path/to/pdf/folder --finegrained
+
+  # 개별 PDF 파일 하나 또는 여러 개
+  python demo/demo_offline.py file.pdf --no-async
+  python demo/demo_offline.py a.pdf b.pdf c.pdf --finegrained
+        """,
+    )
+    parser.add_argument(
+        'input', nargs='*',
+        help='PDF 파일 또는 디렉토리 경로 (생략 시 demo/pdfs/ 사용)',
+        metavar='PATH',
+    )
     pipeline_group = parser.add_mutually_exclusive_group()
     pipeline_group.add_argument(
         '--use-async', dest='pipeline_mode', action='store_const', const=True,
@@ -447,6 +467,11 @@ if __name__ == '__main__':
     pipeline_group.add_argument(
         '--no-async', dest='pipeline_mode', action='store_const', const=False,
         help='Disable async pipeline / sync mode (default)',
+    )
+    parser.add_argument(
+        '--output-dir', dest='output_dir', default=None,
+        help='결과 저장 디렉토리 (기본: demo/output-offline-{mode}/)',
+        metavar='DIR',
     )
     parser.set_defaults(pipeline_mode=False)  # Default: sync mode
     args = parser.parse_args()
@@ -493,17 +518,44 @@ if __name__ == '__main__':
     # =========================================================================
     
     __dir__ = os.path.dirname(os.path.abspath(__file__))
-    pdf_files_dir = os.path.join(__dir__, "pdfs")
-    # pdf_files_dir = os.path.join(__dir__, "images") # 이미지를 input으로 넣었을 때 정확도 이슈 큼 -> 진행하지 않겠음.
-    _output_suffix = {False: 'no_async', True: 'async', 'finegrained': 'finegrained'}
-    output_dir = os.path.join(__dir__, f"output-offline-{_output_suffix.get(args.pipeline_mode, str(args.pipeline_mode))}")
     pdf_suffixes = [".pdf"]
     image_suffixes = [".png", ".jpeg", ".jpg"]
+    valid_suffixes = pdf_suffixes + image_suffixes
 
+    # =========================================================================
+    # 입력 경로 처리: 파일/디렉토리 혼합 지원
+    # =========================================================================
     doc_path_list = []
-    for doc_path in list(Path(pdf_files_dir).glob('*')):
-        if doc_path.suffix in pdf_suffixes + image_suffixes:
-            doc_path_list.append(doc_path)
+    if args.input:
+        for raw in args.input:
+            p = Path(raw).expanduser().resolve()
+            if p.is_dir():
+                doc_path_list.extend(
+                    child for child in sorted(p.glob('*')) if child.suffix in valid_suffixes
+                )
+            elif p.is_file() and p.suffix in valid_suffixes:
+                doc_path_list.append(p)
+            else:
+                logger.warning(f"건너뜀 (파일 없음 또는 지원하지 않는 형식): {raw}")
+    else:
+        # 기본: demo/pdfs/ 디렉토리
+        default_dir = Path(__dir__) / "pdfs"
+        doc_path_list = sorted(
+            p for p in default_dir.glob('*') if p.suffix in valid_suffixes
+        )
+
+    if not doc_path_list:
+        logger.error("처리할 파일이 없습니다. 경로를 확인해 주세요.")
+        import sys; sys.exit(1)
+
+    # =========================================================================
+    # 출력 디렉토리
+    # =========================================================================
+    _output_suffix = {False: 'no_async', True: 'async', 'finegrained': 'finegrained'}
+    if args.output_dir:
+        output_dir = str(Path(args.output_dir).expanduser().resolve())
+    else:
+        output_dir = os.path.join(__dir__, f"output-offline-{_output_suffix.get(args.pipeline_mode, str(args.pipeline_mode))}")
 
     logger.info("=" * 80)
     logger.info(f"Running in closed-network mode: processing {len(doc_path_list)} files")
