@@ -435,11 +435,20 @@ if __name__ == '__main__':
     # CLI 인자 파싱
     # =========================================================================
     parser = argparse.ArgumentParser(description='RapidDoc PDF Parser - Offline Mode')
-    parser.add_argument('--use-async', dest='use_async', action='store_true',
-                        help='Enable async pipeline')
-    parser.add_argument('--no-async', dest='use_async', action='store_false',
-                        help='Disable async pipeline (default)')
-    parser.set_defaults(use_async=False)  # Default: sync mode
+    pipeline_group = parser.add_mutually_exclusive_group()
+    pipeline_group.add_argument(
+        '--use-async', dest='pipeline_mode', action='store_const', const=True,
+        help='Enable TrueAsyncPipeline (batch async mode)',
+    )
+    pipeline_group.add_argument(
+        '--finegrained', dest='pipeline_mode', action='store_const', const='finegrained',
+        help='Enable FinegrainedStreamingPipeline (7-stage per-page streaming)',
+    )
+    pipeline_group.add_argument(
+        '--no-async', dest='pipeline_mode', action='store_const', const=False,
+        help='Disable async pipeline / sync mode (default)',
+    )
+    parser.set_defaults(pipeline_mode=False)  # Default: sync mode
     args = parser.parse_args()
     
     # =========================================================================
@@ -500,7 +509,8 @@ if __name__ == '__main__':
     logger.info(f"Formula recognition: {'enabled' if FORMULA_ENABLE else 'disabled'}"
                 + ("" if FORMULA_REC_ENABLE else " (rec disabled — image only)"))
     logger.info(f"Table recognition: {'enabled' if TABLE_ENABLE else 'disabled'}")
-    logger.info(f"Sync / Async mode: {'async' if args.use_async else 'sync'}")
+    _mode_label = {False: 'sync', True: 'async (TrueAsyncPipeline)', 'finegrained': 'finegrained (7-stage streaming)'}
+    logger.info(f"Pipeline mode: {_mode_label.get(args.pipeline_mode, str(args.pipeline_mode))}")
     logger.info("-" * 80)
     logger.info("Engine configuration:")
     logger.info(f"  Layout  Engine: {LAYOUT_ENGINE}")
@@ -519,5 +529,5 @@ if __name__ == '__main__':
         formula_engine=FORMULA_ENGINE,
         table_engine=TABLE_ENGINE,
         formula_rec_enable=FORMULA_REC_ENABLE,
-        use_async_pipeline=args.use_async,
+        use_async_pipeline=args.pipeline_mode,
     )

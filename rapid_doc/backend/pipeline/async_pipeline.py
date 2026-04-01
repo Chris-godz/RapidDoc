@@ -10,9 +10,15 @@ Stage DAG (각 스테이지는 모든 페이지 작업을 한꺼번에 배치 �
     Stage 5: OCR-det     — 전(全) OCR 후보 영역 배치 검출
     Stage 6: Table       — 전(全) 테이블 순차 처리 (OCR-det 결과 포함)
     Stage 7: OCR-rec     — 전(全) 텍스트 크롭 일괄 인식
+
+StreamingPipeline (스트리밍 파이프라인):
+    각 스테이지를 독립 스레드로 실행하고 queue.Queue로 PageContext를 전달.
+    한 페이지씩 어셈블리 라인 방식으로 처리하여 레이턴시를 최적화한다.
 """
 
 import os
+import queue
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple
@@ -690,6 +696,550 @@ class TrueAsyncPipeline:
         logger.info(f"🔥 Total: {total:.2f}s")
         logger.info("=" * 80)
 
+    # ─────────────── 단일 페이지 처리 메서드 (StreamingPipeline 용) ────────────
+
+    def _layout_one(self, ctx: PageContext) -> None:
+        """단일 페이지 레이아웃 검출."""
+        t0 = time.perf_counter()
+        results = self.model.layout_model.batch_predict([ctx.np_img], 1)
+        layout_res = results[0]
+        if self.formula_enable and self.formula_level == 1:
+            layout_res = [item for item in layout_res if item["category_id"] != 13]
+        ctx.layout_res = layout_res
+        self._accumulate_perf('layout', time.perf_counter() - t0, 1, ctx)
+
+    def _plan_one(self, ctx: PageContext) -> None:
+        """단일 페이지 영역 분류 (CPU only)."""
+        ocr_candidates, table_candidates, formula_regions = get_res_list_from_layout_res(
+            ctx.layout_res, ctx.np_img
+        )
+        checkbox_res = []
+        if self.checkbox_enable:
+            checkbox_img = cv2.cvtColor(ctx.np_img, cv2.COLOR_RGB2BGR)
+            checkbox_res = checkbox_predict(checkbox_img)
+            for res in checkbox_res:
+                poly = [
+                    res['bbox'][0], res['bbox'][1],
+                    res['bbox'][2], res['bbox'][1],
+                    res['bbox'][2], res['bbox'][3],
+                    res['bbox'][0], res['bbox'][3],
+                ]
+                ctx.layout_res.append({
+                    'bbox': res['bbox'], 'poly': poly,
+                    'category_id': CategoryId.CheckBox,
+                    'checkbox': res['text'], 'score': 0.9,
+                })
+        ctx.ocr_candidates = list(ocr_candidates)
+        ctx.checkbox_res = checkbox_res
+        ctx.formula_regions = list(formula_regions)
+        ctx.table_candidates = []
+        for tr in table_candidates:
+            table_img, useful_list = crop_img(tr, ctx.np_img)
+            ctx.table_candidates.append({
+                'table_res': tr,
+                'table_img': table_img,
+                'useful_list': useful_list,
+                'ocr_enable': ctx.ocr_enable,
+            })
+        ctx.formula_crops = []
+        for fr in formula_regions:
+            latex_img, _ = crop_img(fr, ctx.np_img)
+            ctx.formula_crops.append(latex_img)
+
+    def _formula_one(self, ctx: PageContext) -> None:
+        """단일 페이지 수식 인식."""
+        if not ctx.formula_crops:
+            return
+        t0 = time.perf_counter()
+        batch_size = self.formula_config.get("batch_num", 1)
+        latex_results = self.model.formula_model.batch_predict(
+            ctx.formula_crops, batch_size=batch_size
+        )
+        for fr_dict, latex in zip(ctx.formula_regions, latex_results):
+            if latex:
+                fr_dict['latex'] = latex
+        self._accumulate_perf('formula', time.perf_counter() - t0, len(ctx.formula_crops), ctx)
+
+    def _pdf_det_one(self, ctx: PageContext) -> None:
+        """단일 페이지 PDF 텍스트 직접 추출 (모델 없음)."""
+        if self.use_det_mode == 'ocr' or ctx.ocr_enable:
+            return
+        t0 = time.perf_counter()
+        count = 0
+        for res in ctx.ocr_candidates:
+            new_image, useful_list = crop_img(res, ctx.np_img, crop_paste_x=50, crop_paste_y=50)
+            adjusted = get_adjusted_mfdetrec_res(
+                ctx.formula_regions + ctx.checkbox_res, useful_list
+            )
+            bgr_image = cv2.cvtColor(new_image, cv2.COLOR_RGB2BGR)
+            ocr_res = txt_spans_bbox_extract(
+                ctx.page_dict, res, mfd_res=adjusted,
+                scale=ctx.scale, useful_list=useful_list,
+            )
+            if ocr_res:
+                result_list = get_ocr_result_list(
+                    ocr_res, useful_list, ctx.ocr_enable, bgr_image, ctx.lang
+                )
+                ctx.layout_res.extend(result_list)
+                res['_pdf_det_done'] = True
+                count += 1
+        if count:
+            self._accumulate_perf('pdf_det', time.perf_counter() - t0, count, ctx)
+
+    def _ocr_det_one(self, ctx: PageContext) -> None:
+        """단일 페이지 OCR 텍스트 박스 검출."""
+        ocr_model = self.atom_model_manager.get_atom_model(
+            atom_model_name=AtomicModel.OCR,
+            det_db_box_thresh=0.3,
+            ocr_config=self.ocr_config,
+        )
+        items = []
+        for res in ctx.ocr_candidates:
+            if self._should_skip_ocr_det(ctx, res):
+                continue
+            res.pop('need_ocr_det', None)
+            new_image, useful_list = crop_img(res, ctx.np_img, crop_paste_x=50, crop_paste_y=50)
+            adjusted = get_adjusted_mfdetrec_res(
+                ctx.formula_regions + ctx.checkbox_res, useful_list
+            )
+            bgr_image = cv2.cvtColor(new_image, cv2.COLOR_RGB2BGR)
+            items.append((ctx, res, adjusted, bgr_image, useful_list))
+
+        if not items:
+            return
+        t0 = time.perf_counter()
+        if hasattr(ocr_model, 'det_batch_predict'):
+            count = self._ocr_det_batch(ocr_model, items)
+        else:
+            count = self._ocr_det_single(ocr_model, items)
+        if count:
+            self._accumulate_perf('ocr_det', time.perf_counter() - t0, count, ctx)
+
+    def _table_one(self, ctx: PageContext) -> None:
+        """단일 페이지 테이블 인식."""
+        if not ctx.table_candidates:
+            return
+        t0 = time.perf_counter()
+        table_model = self.atom_model_manager.get_atom_model(
+            atom_model_name='table',
+            ocr_config=self.ocr_config,
+            table_config=self.table_config,
+        )
+        ocr_model_for_table = self.atom_model_manager.get_atom_model(
+            atom_model_name=AtomicModel.OCR,
+            ocr_show_log=False,
+            det_db_box_thresh=0.3,
+            ocr_config=self.ocr_config,
+            enable_merge_det_boxes=False,
+        )
+        for ti in ctx.table_candidates:
+            ocr_result = self._prepare_table_ocr_result(ocr_model_for_table, ctx, ti)
+            fill_image_res = extract_table_fill_image(ctx.page_dict, ti, scale=ctx.scale)
+            adjusted = get_adjusted_mfdetrec_res(
+                ctx.formula_regions + ctx.checkbox_res,
+                ti['useful_list'],
+                return_text=True,
+            )
+            html_code, _, _, _ = table_model.predict(
+                ti['table_img'], ocr_result, fill_image_res,
+                adjusted, self.skip_text_in_image, self.use_img2table,
+            )
+            self._apply_table_html(ti, html_code)
+        n = len(ctx.table_candidates)
+        self._accumulate_perf('table', time.perf_counter() - t0, n, ctx)
+
+    def _ocr_rec_one(self, ctx: PageContext) -> None:
+        """단일 페이지 OCR 텍스트 인식."""
+        need_ocr_list = []
+        img_crop_list = []
+        for item in ctx.layout_res:
+            if item.get('category_id') == 15 and 'np_img' in item:
+                item['_pdf_idx'] = ctx.pdf_idx
+                need_ocr_list.append(item)
+                img_crop_list.append(item.pop('np_img'))
+                item.pop('lang', None)
+        if not img_crop_list:
+            return
+        t0 = time.perf_counter()
+        ocr_model = self.atom_model_manager.get_atom_model(
+            atom_model_name=AtomicModel.OCR,
+            det_db_box_thresh=0.3,
+            ocr_config=self.ocr_config,
+        )
+        ocr_res_list = ocr_model.ocr(img_crop_list, det=False, tqdm_enable=False)[0]
+        assert len(ocr_res_list) == len(need_ocr_list)
+        for item, (text, score) in zip(need_ocr_list, ocr_res_list):
+            item.pop('_pdf_idx', None)
+            item['text'] = text
+            item['score'] = float(f"{score:.3f}")
+            if score < OcrConfidence.min_confidence:
+                item['category_id'] = 16
+        self._accumulate_perf('ocr_rec', time.perf_counter() - t0, len(img_crop_list), ctx)
+
+    def _accumulate_perf(
+        self,
+        key: str,
+        elapsed: float,
+        count: int,
+        ctx: PageContext,
+    ) -> None:
+        """스레드 안전한 성능 통계 누적 (StreamingPipeline에서 override)."""
+        # TrueAsyncPipeline(배치 모드)에서는 _record_perf로 위임
+        # — 이 메서드를 직접 호출하는 경우는 StreamingPipeline 전용
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 스트리밍 파이프라인: 페이지 단위 어셈블리 라인
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SENTINEL = object()  # 종료 신호
+
+
+class StreamingPipeline(TrueAsyncPipeline):
+    """
+    페이지 단위 어셈블리 라인 파이프라인.
+
+    각 스테이지가 독립 스레드로 실행되고, queue.Queue로 PageContext를 전달한다.
+    Layout → Plan → Formula+PDF-det+OCR-det → Table → OCR-rec
+    모든 스테이지가 서로 다른 페이지를 동시에 처리한다.
+
+    스테이지 구성:
+        Stage 1: Layout      (Worker 스레드 — NPU)
+        Stage 2: Plan        (Worker 스레드 — CPU)
+        Stage 3: Enrich      (Worker 스레드 — Formula + PDF-det + OCR-det 순차)
+        Stage 4: Table       (Worker 스레드 — NPU+OCR, bottleneck)
+        Stage 5: OCR-rec     (Worker 스레드 — OCR)
+    """
+
+    def run(
+        self,
+        images_with_extra_info: List[Tuple],
+    ) -> Tuple[List[Any], Dict]:
+        total = len(images_with_extra_info)
+        logger.info(f"🚀 StreamingPipeline: {total} pages (assembly-line mode)")
+        t_total = time.perf_counter()
+
+        # 스레드 안전 perf 누적용 Lock
+        self._perf_lock = threading.Lock()
+        self._streaming_perf: Dict[str, Dict] = defaultdict(lambda: {'time': 0.0, 'count': 0})
+
+        # 각 스테이지 간 Queue (maxsize=2: 처리 중 1 + 버퍼 1)
+        q_layout  = queue.Queue(maxsize=2)
+        q_plan    = queue.Queue(maxsize=2)
+        q_enrich  = queue.Queue(maxsize=2)
+        q_table   = queue.Queue(maxsize=2)
+        q_done    = queue.Queue()
+
+        # 스테이지 함수 정의
+        def stage_layout():
+            for item in images_with_extra_info:
+                ctx = self._build_one_context(item, _seq_counter())
+                if self.verbose:
+                    logger.debug(f"[Stream] Layout  page ({ctx.pdf_idx},{ctx.page_idx})")
+                self._layout_one(ctx)
+                q_layout.put(ctx)
+            q_layout.put(_SENTINEL)
+
+        def stage_plan():
+            while True:
+                ctx = q_layout.get()
+                if ctx is _SENTINEL:
+                    q_plan.put(_SENTINEL)
+                    break
+                if self.verbose:
+                    logger.debug(f"[Stream] Plan    page ({ctx.pdf_idx},{ctx.page_idx})")
+                self._plan_one(ctx)
+                q_plan.put(ctx)
+
+        def stage_enrich():
+            """Formula + PDF-det + OCR-det 를 한 스레드에서 순차 처리."""
+            while True:
+                ctx = q_plan.get()
+                if ctx is _SENTINEL:
+                    q_enrich.put(_SENTINEL)
+                    break
+                if self.verbose:
+                    logger.debug(f"[Stream] Enrich  page ({ctx.pdf_idx},{ctx.page_idx})")
+                if self.formula_enable and self.formula_rec_enable:
+                    self._formula_one(ctx)
+                self._pdf_det_one(ctx)
+                self._ocr_det_one(ctx)
+                q_enrich.put(ctx)
+
+        def stage_table():
+            while True:
+                ctx = q_enrich.get()
+                if ctx is _SENTINEL:
+                    q_table.put(_SENTINEL)
+                    break
+                if self.verbose:
+                    logger.debug(f"[Stream] Table   page ({ctx.pdf_idx},{ctx.page_idx})")
+                if self.table_enable:
+                    self._table_one(ctx)
+                q_table.put(ctx)
+
+        def stage_ocr_rec():
+            while True:
+                ctx = q_table.get()
+                if ctx is _SENTINEL:
+                    q_done.put(_SENTINEL)
+                    break
+                if self.verbose:
+                    logger.debug(f"[Stream] OCR-rec page ({ctx.pdf_idx},{ctx.page_idx})")
+                self._ocr_rec_one(ctx)
+                q_done.put(ctx)
+
+        # 시퀀스 카운터 (thread-safe, layout 스레드만 사용)
+        _seq = [-1]
+        def _seq_counter():
+            _seq[0] += 1
+            return _seq[0]
+
+        # 스레드 시작
+        threads = [
+            threading.Thread(target=stage_layout,  name="stream-layout",  daemon=True),
+            threading.Thread(target=stage_plan,    name="stream-plan",    daemon=True),
+            threading.Thread(target=stage_enrich,  name="stream-enrich",  daemon=True),
+            threading.Thread(target=stage_table,   name="stream-table",   daemon=True),
+            threading.Thread(target=stage_ocr_rec, name="stream-ocr-rec", daemon=True),
+        ]
+        for t in threads:
+            t.start()
+
+        # 완료된 PageContext 수집
+        completed: List[PageContext] = []
+        sentinel_count = 0
+        while sentinel_count < 1:
+            item = q_done.get()
+            if item is _SENTINEL:
+                sentinel_count += 1
+            else:
+                completed.append(item)
+
+        for t in threads:
+            t.join()
+
+        # 순서 복원 (pdf_idx, page_idx 기준)
+        completed.sort(key=lambda c: (c.pdf_idx, c.page_idx))
+
+        elapsed = time.perf_counter() - t_total
+        logger.info(
+            f"✅ StreamingPipeline: {total} pages in {elapsed:.2f}s "
+            f"({total / max(elapsed, 0.001):.2f} it/s)"
+        )
+        # 스트리밍 perf stats를 TrueAsyncPipeline의 perf_stats에 복사해 요약 출력
+        self.perf_stats = {k: v for k, v in self._streaming_perf.items()}
+        self._print_perf_summary()
+
+        results = [ctx.layout_res for ctx in completed]
+        return results, dict(self.pdf_perf_stats)
+
+    def _build_one_context(self, item: Tuple, _seq: int) -> PageContext:
+        """단일 item에서 PageContext 생성."""
+        if len(item) == 7:
+            img, scale, ocr_enable, lang, page_dict, pdf_idx, page_idx = item
+        else:
+            img, scale, ocr_enable, lang, page_dict = item
+            pdf_idx, page_idx = 0, _seq
+        np_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        return PageContext(
+            pdf_idx=pdf_idx,
+            page_idx=page_idx,
+            np_img=np_img,
+            scale=scale,
+            ocr_enable=ocr_enable,
+            lang=lang,
+            page_dict=page_dict,
+        )
+
+    def _accumulate_perf(
+        self,
+        key: str,
+        elapsed: float,
+        count: int,
+        ctx: PageContext,
+    ) -> None:
+        """스레드 안전한 성능 통계 누적."""
+        with self._perf_lock:
+            self._streaming_perf[key]['time']  += elapsed
+            self._streaming_perf[key]['count'] += count
+            per_item = elapsed / max(count, 1)
+            self.pdf_perf_stats[ctx.pdf_idx][key]['time']  += per_item
+            self.pdf_perf_stats[ctx.pdf_idx][key]['count'] += 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 세분화 스트리밍 파이프라인: Enrich 단계를 Formula/PDF-det/OCR-det 3단계로 분리
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FinegrainedStreamingPipeline(StreamingPipeline):
+    """
+    7단계 페이지 단위 어셈블리 라인 파이프라인.
+
+    StreamingPipeline의 Enrich(Formula+PDF-det+OCR-det) 단계를
+    3개의 독립 스레드로 분리하여 NPU 활용률을 높인다.
+    모든 단일 페이지 처리 메서드(_xxx_one)는 부모 클래스를 그대로 재사용한다.
+
+    스테이지 구성:
+        Stage 1: Layout   (fg-layout)   — NPU / maxsize=2
+        Stage 2: Plan     (fg-plan)     — CPU / maxsize=2
+        Stage 3: Formula  (fg-formula)  — NPU(ONNX) / maxsize=2
+        Stage 4: PDF-det  (fg-pdf-det)  — CPU / maxsize=2
+        Stage 5: OCR-det  (fg-ocr-det)  — NPU / maxsize=4 (버퍼 확장)
+        Stage 6: Table    (fg-table)    — NPU / maxsize=4 (버퍼 확장)
+        Stage 7: OCR-rec  (fg-ocr-rec)  — NPU / maxsize=unbounded (출력 수집)
+    """
+
+    _Q_OCR_MAXSIZE: int = 4     # OCR 집약 스테이지 버퍼
+    _Q_DEFAULT_MAXSIZE: int = 2  # 일반 스테이지 버퍼
+
+    def run(
+        self,
+        images_with_extra_info: List[Tuple],
+    ) -> Tuple[List[Any], Dict]:
+        total = len(images_with_extra_info)
+        logger.info(f"🚀 FinegrainedStreamingPipeline: {total} pages (7-stage assembly-line)")
+        t_total = time.perf_counter()
+
+        self._perf_lock = threading.Lock()
+        self._streaming_perf: Dict[str, Dict] = defaultdict(lambda: {'time': 0.0, 'count': 0})
+
+        # 스테이지 간 Queue
+        q_layout  = queue.Queue(maxsize=self._Q_DEFAULT_MAXSIZE)
+        q_plan    = queue.Queue(maxsize=self._Q_DEFAULT_MAXSIZE)
+        q_formula = queue.Queue(maxsize=self._Q_DEFAULT_MAXSIZE)
+        q_pdf_det = queue.Queue(maxsize=self._Q_DEFAULT_MAXSIZE)
+        q_ocr_det = queue.Queue(maxsize=self._Q_OCR_MAXSIZE)
+        q_table   = queue.Queue(maxsize=self._Q_OCR_MAXSIZE)
+        q_done    = queue.Queue()
+
+        # thread-safe 시퀀스 카운터 (stage_layout 스레드 전용)
+        _seq = [-1]
+
+        def _next_seq() -> int:
+            _seq[0] += 1
+            return _seq[0]
+
+        # ── 스테이지 함수 ──────────────────────────────────────────────────
+
+        def stage_layout():
+            for item in images_with_extra_info:
+                ctx = self._build_one_context(item, _next_seq())
+                if self.verbose:
+                    logger.debug(f"[FG] Layout   page ({ctx.pdf_idx},{ctx.page_idx})")
+                self._layout_one(ctx)
+                q_layout.put(ctx)
+            q_layout.put(_SENTINEL)
+
+        def stage_plan():
+            while True:
+                ctx = q_layout.get()
+                if ctx is _SENTINEL:
+                    q_plan.put(_SENTINEL)
+                    break
+                if self.verbose:
+                    logger.debug(f"[FG] Plan     page ({ctx.pdf_idx},{ctx.page_idx})")
+                self._plan_one(ctx)
+                q_plan.put(ctx)
+
+        def stage_formula():
+            while True:
+                ctx = q_plan.get()
+                if ctx is _SENTINEL:
+                    q_formula.put(_SENTINEL)
+                    break
+                if self.verbose:
+                    logger.debug(f"[FG] Formula  page ({ctx.pdf_idx},{ctx.page_idx})")
+                if self.formula_enable and self.formula_rec_enable:
+                    self._formula_one(ctx)
+                q_formula.put(ctx)
+
+        def stage_pdf_det():
+            while True:
+                ctx = q_formula.get()
+                if ctx is _SENTINEL:
+                    q_pdf_det.put(_SENTINEL)
+                    break
+                if self.verbose:
+                    logger.debug(f"[FG] PDF-det  page ({ctx.pdf_idx},{ctx.page_idx})")
+                self._pdf_det_one(ctx)
+                q_pdf_det.put(ctx)
+
+        def stage_ocr_det():
+            while True:
+                ctx = q_pdf_det.get()
+                if ctx is _SENTINEL:
+                    q_ocr_det.put(_SENTINEL)
+                    break
+                if self.verbose:
+                    logger.debug(f"[FG] OCR-det  page ({ctx.pdf_idx},{ctx.page_idx})")
+                self._ocr_det_one(ctx)
+                q_ocr_det.put(ctx)
+
+        def stage_table():
+            while True:
+                ctx = q_ocr_det.get()
+                if ctx is _SENTINEL:
+                    q_table.put(_SENTINEL)
+                    break
+                if self.verbose:
+                    logger.debug(f"[FG] Table    page ({ctx.pdf_idx},{ctx.page_idx})")
+                if self.table_enable:
+                    self._table_one(ctx)
+                q_table.put(ctx)
+
+        def stage_ocr_rec():
+            while True:
+                ctx = q_table.get()
+                if ctx is _SENTINEL:
+                    q_done.put(_SENTINEL)
+                    break
+                if self.verbose:
+                    logger.debug(f"[FG] OCR-rec  page ({ctx.pdf_idx},{ctx.page_idx})")
+                self._ocr_rec_one(ctx)
+                q_done.put(ctx)
+
+        # ── 스레드 시작 ───────────────────────────────────────────────────
+
+        threads = [
+            threading.Thread(target=stage_layout,  name="fg-layout",  daemon=True),
+            threading.Thread(target=stage_plan,    name="fg-plan",    daemon=True),
+            threading.Thread(target=stage_formula, name="fg-formula", daemon=True),
+            threading.Thread(target=stage_pdf_det, name="fg-pdf-det", daemon=True),
+            threading.Thread(target=stage_ocr_det, name="fg-ocr-det", daemon=True),
+            threading.Thread(target=stage_table,   name="fg-table",   daemon=True),
+            threading.Thread(target=stage_ocr_rec, name="fg-ocr-rec", daemon=True),
+        ]
+        for t in threads:
+            t.start()
+
+        # ── 결과 수집 ─────────────────────────────────────────────────────
+
+        completed: List[PageContext] = []
+        while True:
+            item = q_done.get()
+            if item is _SENTINEL:
+                break
+            completed.append(item)
+
+        for t in threads:
+            t.join()
+
+        # (pdf_idx, page_idx) 기준 정렬
+        completed.sort(key=lambda c: (c.pdf_idx, c.page_idx))
+
+        elapsed = time.perf_counter() - t_total
+        logger.info(
+            f"✅ FinegrainedStreamingPipeline: {total} pages in {elapsed:.2f}s "
+            f"({total / max(elapsed, 0.001):.2f} it/s)"
+        )
+        self.perf_stats = {k: v for k, v in self._streaming_perf.items()}
+        self._print_perf_summary()
+
+        results = [ctx.layout_res for ctx in completed]
+        return results, dict(self.pdf_perf_stats)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 공개 API (pipeline_analyze.py 에서 호출)
@@ -710,7 +1260,16 @@ def async_batch_image_analyze(
     """
     TrueAsyncPipeline을 사용한 배치 이미지 분석 (공개 API).
 
+    모든 페이지를 스테이지별 배치로 처리한다:
+      Layout(전체) → Plan(전체) → Formula(전체) → OCR-det(전체) → Table(전체) → OCR-rec(전체)
+    DX Engine은 배치 제출 시 NPU 내부 큐를 통해 병렬 처리하므로
+    단일 페이지 스트리밍보다 배치 모드가 더 효율적이다.
+
     pipeline_analyze.py → use_async_pipeline=True 경로에서 호출된다.
+
+    Note: StreamingPipeline(어셈블리 라인 방식)도 이 파일에 구현되어 있으나,
+    DX Engine NPU는 배치 제출 시 내부 병렬화가 더 효율적이어서 기본값으로
+    TrueAsyncPipeline을 사용한다.
     """
     # use_async=True 로 복사체 생성 (원본 dict 수정 방지)
     ocr_config = {**(ocr_config or {}), 'use_async': True}
@@ -730,6 +1289,61 @@ def async_batch_image_analyze(
     )
 
     pipeline = TrueAsyncPipeline(
+        model=model,
+        formula_enable=formula_enable,
+        table_enable=table_enable,
+        use_det_mode=use_det_mode,
+        layout_config=layout_config,
+        ocr_config=ocr_config,
+        formula_config=formula_config,
+        table_config=table_config,
+        checkbox_config=checkbox_config,
+        verbose=verbose,
+    )
+
+    results, pdf_perf_stats = pipeline.run(images_with_extra_info)
+    clean_memory(get_device())
+    return results, pdf_perf_stats
+
+
+def finegrained_streaming_batch_image_analyze(
+    images_with_extra_info: List[Tuple],
+    formula_enable: bool = True,
+    table_enable: bool = True,
+    layout_config: dict = None,
+    ocr_config: dict = None,
+    formula_config: dict = None,
+    table_config: dict = None,
+    checkbox_config: dict = None,
+    input_interval: float = 0.0,   # 하위 호환 — 미사용
+    verbose: bool = False,
+) -> Tuple[List[Any], Dict]:
+    """
+    FinegrainedStreamingPipeline을 사용한 배치 이미지 분석 (공개 API).
+
+    Enrich 단계(Formula+PDF-det+OCR-det)를 3개의 독립 스레드 스테이지로 분리하여
+    NPU 활용률을 높인다. 각 페이지가 7단계 어셈블리 라인을 순서대로 흐른다:
+      Layout → Plan → Formula → PDF-det → OCR-det → Table → OCR-rec
+
+    pipeline_analyze.py → use_async_pipeline="finegrained" 경로에서 호출된다.
+    """
+    ocr_config = {**(ocr_config or {}), 'use_async': True}
+    layout_config = {**(layout_config or {}), 'use_async': True}
+    table_config = {**(table_config or {}), 'use_async': True}
+
+    use_det_mode = ocr_config.get('use_det_mode', 'auto')
+
+    model = custom_model_init(
+        lang=None,
+        formula_enable=formula_enable,
+        table_enable=table_enable,
+        layout_config=layout_config,
+        ocr_config=ocr_config,
+        formula_config=formula_config,
+        table_config=table_config,
+    )
+
+    pipeline = FinegrainedStreamingPipeline(
         model=model,
         formula_enable=formula_enable,
         table_enable=table_enable,

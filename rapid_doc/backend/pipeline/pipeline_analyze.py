@@ -180,7 +180,22 @@ def doc_analyze(
     all_pdf_perf_stats = {}  # PDF별 성능 통계 (배치 간 병합)
     processed_images_count = 0
     
-    if use_async_pipeline:
+    if use_async_pipeline == "finegrained":
+        logger.info(f"🚀 Using FinegrainedStreamingPipeline for {len(images_with_extra_info)} pages")
+        from .async_pipeline import finegrained_streaming_batch_image_analyze
+        results, all_pdf_perf_stats = finegrained_streaming_batch_image_analyze(
+            images_with_extra_info,
+            formula_enable=formula_enable,
+            table_enable=table_enable,
+            layout_config=layout_config,
+            ocr_config=ocr_config,
+            formula_config=formula_config,
+            table_config=table_config,
+            checkbox_config=checkbox_config,
+            input_interval=async_input_interval,
+            verbose=async_verbose,
+        )
+    elif use_async_pipeline:
         # Async mode: Process all pages at once using AsyncPipelineRapidDoc
         logger.info(f"🚀 Using AsyncPipelineRapidDoc for {len(images_with_extra_info)} pages")
         

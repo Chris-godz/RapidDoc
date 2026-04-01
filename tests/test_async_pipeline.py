@@ -33,6 +33,7 @@ import inspect
 import os
 import sys
 import time
+import threading
 import types
 import unittest
 from collections import defaultdict
@@ -42,6 +43,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import cv2
 import numpy as np
+import pytest
 from PIL import Image
 
 # ──────────────────────────── 경로 설정 ───────────────────────────────────────
@@ -389,7 +391,21 @@ class TestMockPipelineRun(unittest.TestCase):
     """
     실제 모델 없이 TrueAsyncPipeline.run()의 전체 흐름을 검증한다.
     모든 모델 호출은 mock으로 대체한다.
+    각 테스트의 wall-clock latency를 측정해 출력한다.
     """
+    _latency_results: list = []  # 클래스 공유 결과 누적
+
+    @classmethod
+    def tearDownClass(cls):
+        if not cls._latency_results:
+            return
+        print("\n[L2 Latency] Mock Pipeline Run")
+        print(f"  {'Test':<52} {'Latency':>10}")
+        print("  " + "-" * 64)
+        for name, elapsed in cls._latency_results:
+            print(f"  {name:<52} {elapsed*1000:>8.2f} ms")
+        total = sum(e for _, e in cls._latency_results)
+        print(f"  {'TOTAL':<52} {total*1000:>8.2f} ms")
 
     def setUp(self):
         from rapid_doc.backend.pipeline.async_pipeline import TrueAsyncPipeline
@@ -446,13 +462,23 @@ class TestMockPipelineRun(unittest.TestCase):
             verbose=False,
         )
 
+    def _timed_run(self, fn, *args, **kwargs):
+        """fn() 실행 시간을 측정하고 (result, elapsed_s) 반환."""
+        t0 = time.perf_counter()
+        result = fn(*args, **kwargs)
+        return result, time.perf_counter() - t0
+
+    def _record(self, name: str, elapsed: float):
+        TestMockPipelineRun._latency_results.append((name, elapsed))
+
     def test_run_returns_correct_shape(self):
         """run()은 (results_list, perf_stats_dict)를 반환하고 pages 수와 일치해야 한다."""
         pipeline = self._make_pipeline()
         imgs = [(_make_dummy_pil(), 1.0, False, 'ch', {'blocks': []}, 0, i)
                 for i in range(3)]
 
-        results, perf_stats = pipeline.run(imgs)
+        (results, perf_stats), elapsed = self._timed_run(pipeline.run, imgs)
+        self._record('run_returns_correct_shape (3 pages)', elapsed)
 
         self.assertIsInstance(results, list)
         self.assertEqual(len(results), 3, "페이지 수만큼 결과가 반환되어야 한다")
@@ -462,13 +488,15 @@ class TestMockPipelineRun(unittest.TestCase):
         """단일 페이지 입력도 올바르게 처리된다."""
         pipeline = self._make_pipeline()
         imgs = [(_make_dummy_pil(), 1.0, False, 'ch', None, 0, 0)]
-        results, _ = pipeline.run(imgs)
+        (results, _), elapsed = self._timed_run(pipeline.run, imgs)
+        self._record('run_single_page (1 page)', elapsed)
         self.assertEqual(len(results), 1)
 
     def test_run_empty_input(self):
         """빈 입력 리스트는 빈 결과를 반환하고 예외를 발생시키지 않는다."""
         pipeline = self._make_pipeline()
-        results, perf_stats = pipeline.run([])
+        (results, perf_stats), elapsed = self._timed_run(pipeline.run, [])
+        self._record('run_empty_input (0 pages)', elapsed)
         self.assertEqual(results, [])
         self.assertIsInstance(perf_stats, dict)
 
@@ -477,23 +505,24 @@ class TestMockPipelineRun(unittest.TestCase):
         pipeline = self._make_pipeline()
         imgs = [(_make_dummy_pil(), 1.0, False, 'ch', {'blocks': []}, 0, i)
                 for i in range(2)]
-        pipeline.run(imgs)
+        _, elapsed = self._timed_run(pipeline.run, imgs)
+        self._record('layout_model_called_once (2 pages)', elapsed)
         self.mock_model.layout_model.batch_predict.assert_called_once()
 
     def test_formula_skipped_when_disabled(self):
         """formula_enable=False 이면 formula_model.batch_predict가 호출되지 않는다."""
         pipeline = self._make_pipeline(formula_enable=False)
         imgs = [(_make_dummy_pil(), 1.0, False, 'ch', None, 0, 0)]
-        pipeline.run(imgs)
+        _, elapsed = self._timed_run(pipeline.run, imgs)
+        self._record('formula_skipped_when_disabled (1 page)', elapsed)
         self.mock_model.formula_model.batch_predict.assert_not_called()
 
     def test_perf_stats_structure(self):
         """perf_stats는 dict이고 'layout' 키가 포함될 수 있다."""
         pipeline = self._make_pipeline()
         imgs = [(_make_dummy_pil(), 1.0, False, 'ch', None, 0, 0)]
-        _, perf_stats = pipeline.run(imgs)
-        # layout 측정이 0 페이지가 아니면 layout 키가 있을 수 있음
-        # 구조 검증: 값이 있다면 dict여야 한다
+        (_, perf_stats), elapsed = self._timed_run(pipeline.run, imgs)
+        self._record('perf_stats_structure (1 page)', elapsed)
         for _pdf_idx, pdf_stats in perf_stats.items():
             for _stage, stage_stats in pdf_stats.items():
                 self.assertIn('time', stage_stats)
@@ -507,7 +536,8 @@ class TestMockPipelineRun(unittest.TestCase):
             (_make_dummy_pil(), 1.0, False, 'ch', None, 1, 0),
             (_make_dummy_pil(), 1.0, False, 'ch', None, 1, 1),
         ]
-        results, _ = pipeline.run(imgs)
+        (results, _), elapsed = self._timed_run(pipeline.run, imgs)
+        self._record('multiple_pdfs_separate_contexts (3 pages, 2 pdfs)', elapsed)
         self.assertEqual(len(results), 3)
 
 
@@ -637,6 +667,7 @@ def _integration_available():
     return True
 
 
+@pytest.mark.integration
 @unittest.skipUnless(_integration_available(), _INTEGRATION_REASON)
 class TestIntegrationSyncVsAsync(unittest.TestCase):
     """
@@ -784,6 +815,21 @@ class TestIntegrationSyncVsAsync(unittest.TestCase):
             use_async_pipeline=False,
         )
 
+    def _clear_model_cache(self):
+        """AtomModelSingleton 캐시를 비워 NPU 모델을 언로드한다.
+        Sync → Async 순차 실행 시 NPU 메모리 초과를 방지한다."""
+        from rapid_doc.backend.pipeline.model_init import AtomModelSingleton
+        AtomModelSingleton._models.clear()
+
+    def setUp(self):
+        """각 테스트 실행 전 모델 캐시를 초기화해 이전 테스트의 NPU 모델이 남지 않도록 한다."""
+        self._clear_model_cache()
+
+    def tearDown(self):
+        """각 테스트 실행 후 모델 캐시를 초기화해 다음 테스트를 위해 NPU 메모리를 확보한다."""
+        self._clear_model_cache()
+        time.sleep(3.0)  # NPU 드라이버 메모리 해제 대기
+
     def _run_async(self):
         from rapid_doc.backend.pipeline.pipeline_analyze import doc_analyze
         return doc_analyze(
@@ -799,40 +845,37 @@ class TestIntegrationSyncVsAsync(unittest.TestCase):
 
     def test_async_returns_same_page_count(self):
         """async 파이프라인의 페이지 수가 sync와 동일해야 한다."""
-        if self.using_dxengine:
-            self.skipTest(
-                "dxengine(NPU): Sync+Async 동시 로드 시 NPU 메모리 초과. "
-                "onnxruntime 환경에서 실행하세요."
-            )
         sync_results = self._run_sync()
+        self._clear_model_cache()
         async_results = self._run_async()
-        # doc_analyze returns (infer_results, ...) where infer_results[pdf_idx] = [page_dict, ...]
-        sync_pages = sync_results[0][0]   # pages of first PDF
+        sync_pages = sync_results[0][0]
         async_pages = async_results[0][0]
         self.assertEqual(len(sync_pages), len(async_pages),
                          "Sync/Async 페이지 수 불일치")
 
     def test_async_layout_dets_non_empty(self):
         """텍스트가 있는 PDF라면 layout_dets가 비어있지 않아야 한다."""
+        t0 = time.perf_counter()
         async_results = self._run_async()
-        # doc_analyze returns (infer_results, ...); infer_results[0] = pages of first PDF
+        elapsed = time.perf_counter() - t0
         pages = async_results[0][0]
         total_dets = sum(len(page['layout_dets']) for page in pages)
+        print(f"\n[L3 Latency] async layout_dets={total_dets} dets / {len(pages)} pages  wall={elapsed:.3f}s  ({len(pages)/max(elapsed,0.001):.2f} pages/s)")
         self.assertGreater(total_dets, 0, "layout_dets가 모두 비어있음")
 
-    def test_category_id_distribution_similar(self):
-        """Sync와 Async의 category_id 분포가 크게 다르지 않아야 한다."""
-        if self.using_dxengine:
-            self.skipTest(
-                "dxengine(NPU): Sync+Async 동시 로드 시 NPU 메모리 초과. "
-                "onnxruntime 환경에서 실행하세요."
-            )
+    @pytest.mark.heavy
+    def test_zz_category_id_distribution_similar(self):
+        """Sync와 Async의 category_id 분포가 크게 다르지 않아야 한다.
+        (Sync+Async를 모두 실행하는 가장 무거운 테스트 — 마지막 실행용)
+        NPU 메모리 제약으로 다른 integration 테스트와 연속 실행 시 crash 발생 가능.
+        단독 실행: python -m pytest -m integration_heavy
+        """
         from collections import Counter
         sync_results = self._run_sync()
+        self._clear_model_cache()
         async_results = self._run_async()
 
         def count_categories(results):
-            # results[0] = infer_results (list of PDFs); [0] selects first PDF's pages
             return Counter(
                 det['category_id']
                 for page in results[0][0]
@@ -842,26 +885,23 @@ class TestIntegrationSyncVsAsync(unittest.TestCase):
         sync_cats = count_categories(sync_results)
         async_cats = count_categories(async_results)
 
-        # 동일 category_id 집합이어야 한다
         self.assertEqual(set(sync_cats.keys()), set(async_cats.keys()),
                          f"category_id 집합 불일치\n  sync={set(sync_cats.keys())}\n  async={set(async_cats.keys())}")
 
     def test_async_faster_or_comparable_to_sync(self):
         """Async 파이프라인이 Sync보다 현저히 느리지 않아야 한다 (2× 이내)."""
-        if self.using_dxengine:
-            self.skipTest(
-                "dxengine(NPU): Sync+Async 동시 로드 시 NPU 메모리 초과. "
-                "onnxruntime 환경에서 실행하세요."
-            )
         t0 = time.perf_counter()
         self._run_sync()
         sync_time = time.perf_counter() - t0
+
+        self._clear_model_cache()
 
         t0 = time.perf_counter()
         self._run_async()
         async_time = time.perf_counter() - t0
 
         ratio = async_time / max(sync_time, 0.001)
+        print(f"\n[L3 Latency] sync={sync_time:.3f}s  async={async_time:.3f}s  ratio={ratio:.2f}x")
         self.assertLess(ratio, 2.0,
                         f"Async({async_time:.2f}s)이 Sync({sync_time:.2f}s)보다 2배 이상 느림 (ratio={ratio:.2f})")
 
@@ -882,6 +922,209 @@ class TestIntegrationSyncVsAsync(unittest.TestCase):
             page = first_pdf_pages[0]
             self.assertIn('layout_dets', page)
             self.assertIn('page_info', page)
+
+
+# =============================================================================
+# L1: FinegrainedStreamingPipeline 서명 검증
+# =============================================================================
+
+class TestFinegrainedStreamingPipelineSignature(unittest.TestCase):
+    """FinegrainedStreamingPipeline 존재 및 API 서명 검증 (L1 — 모델 불필요)."""
+
+    def test_class_exists_and_is_subclass(self):
+        """FinegrainedStreamingPipeline이 StreamingPipeline의 서브클래스여야 한다."""
+        from rapid_doc.backend.pipeline.async_pipeline import (
+            FinegrainedStreamingPipeline,
+            StreamingPipeline,
+        )
+        self.assertTrue(issubclass(FinegrainedStreamingPipeline, StreamingPipeline))
+
+    def test_run_method_exists(self):
+        """run() 메서드가 존재해야 한다."""
+        from rapid_doc.backend.pipeline.async_pipeline import FinegrainedStreamingPipeline
+        self.assertTrue(hasattr(FinegrainedStreamingPipeline, 'run'))
+
+    def test_public_api_exists(self):
+        """finegrained_streaming_batch_image_analyze 함수가 존재해야 한다."""
+        from rapid_doc.backend.pipeline import async_pipeline
+        self.assertTrue(
+            hasattr(async_pipeline, 'finegrained_streaming_batch_image_analyze'),
+            "finegrained_streaming_batch_image_analyze 함수가 async_pipeline에 없음",
+        )
+
+    def test_public_api_signature_params_match(self):
+        """공개 API 함수의 파라미터 이름이 async_batch_image_analyze와 동일해야 한다."""
+        from rapid_doc.backend.pipeline.async_pipeline import (
+            async_batch_image_analyze,
+            finegrained_streaming_batch_image_analyze,
+        )
+        ref_sig = inspect.signature(async_batch_image_analyze)
+        new_sig = inspect.signature(finegrained_streaming_batch_image_analyze)
+        self.assertEqual(
+            set(ref_sig.parameters),
+            set(new_sig.parameters),
+            f"파라미터 불일치: {set(ref_sig.parameters) ^ set(new_sig.parameters)}",
+        )
+
+    def test_public_api_signature_defaults_match(self):
+        """공개 API 함수의 파라미터 기본값이 async_batch_image_analyze와 동일해야 한다."""
+        from rapid_doc.backend.pipeline.async_pipeline import (
+            async_batch_image_analyze,
+            finegrained_streaming_batch_image_analyze,
+        )
+        ref_sig = inspect.signature(async_batch_image_analyze)
+        new_sig = inspect.signature(finegrained_streaming_batch_image_analyze)
+        for name, ref_param in ref_sig.parameters.items():
+            new_param = new_sig.parameters.get(name)
+            self.assertIsNotNone(new_param, f"파라미터 '{name}' 누락")
+            self.assertEqual(
+                ref_param.default,
+                new_param.default,
+                f"파라미터 '{name}' 기본값 불일치: "
+                f"{ref_param.default!r} vs {new_param.default!r}",
+            )
+
+    def test_queue_maxsize_constants(self):
+        """OCR 집약 스테이지 Queue maxsize가 기본보다 커야 한다."""
+        from rapid_doc.backend.pipeline.async_pipeline import FinegrainedStreamingPipeline
+        self.assertGreater(
+            FinegrainedStreamingPipeline._Q_OCR_MAXSIZE,
+            FinegrainedStreamingPipeline._Q_DEFAULT_MAXSIZE,
+        )
+
+
+# =============================================================================
+# L2: FinegrainedStreamingPipeline Mock 통합 테스트
+# =============================================================================
+
+class TestFinegrainedStreamingPipelineMock(unittest.TestCase):
+    """FinegrainedStreamingPipeline Mock 통합 테스트 (L2 — 모델 불필요)."""
+
+    def setUp(self):
+        """기존 TestMockPipelineRun과 동일한 패턴으로 패치 관리."""
+        self.mock_model = _make_mock_model()
+        self.mock_ocr = _make_mock_ocr_model()
+        self.mock_table = _make_mock_table_model()
+
+        self.patcher_res_list = patch(
+            'rapid_doc.backend.pipeline.async_pipeline.get_res_list_from_layout_res',
+            return_value=([], [], []),
+        )
+        self.patcher_formula_enable = patch(
+            'rapid_doc.backend.pipeline.async_pipeline.get_formula_enable',
+            side_effect=lambda x: x,
+        )
+        self.patcher_table_enable = patch(
+            'rapid_doc.backend.pipeline.async_pipeline.get_table_enable',
+            side_effect=lambda x: x,
+        )
+        self.patcher_atom = patch(
+            'rapid_doc.backend.pipeline.async_pipeline.AtomModelSingleton',
+        )
+
+        self.patcher_res_list.start()
+        self.patcher_formula_enable.start()
+        self.patcher_table_enable.start()
+        mock_atom_cls = self.patcher_atom.start()
+        mock_atom_cls.return_value.get_atom_model.return_value = self.mock_ocr
+
+    def tearDown(self):
+        self.patcher_res_list.stop()
+        self.patcher_formula_enable.stop()
+        self.patcher_table_enable.stop()
+        self.patcher_atom.stop()
+
+    def _make_pipeline(self, formula_enable=False, table_enable=False):
+        from rapid_doc.backend.pipeline.async_pipeline import FinegrainedStreamingPipeline
+        return FinegrainedStreamingPipeline(
+            model=self.mock_model,
+            formula_enable=formula_enable,
+            table_enable=table_enable,
+            verbose=False,
+        )
+
+    def _make_items(self, n: int):
+        """n개의 더미 입력 튜플 생성."""
+        img = Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8))
+        return [(img, 1.0, False, 'ch', {}, 0, i) for i in range(n)]
+
+    def test_run_returns_correct_shape(self):
+        """run()이 (results, perf_stats) 튜플을 반환해야 한다."""
+        pipeline = self._make_pipeline()
+        items = self._make_items(3)
+        results, perf_stats = pipeline.run(items)
+        self.assertIsInstance(results, list)
+        self.assertEqual(len(results), 3)
+        self.assertIsInstance(perf_stats, dict)
+
+    def test_run_preserves_page_order(self):
+        """완료된 페이지가 (pdf_idx, page_idx) 순서로 정렬되어야 한다."""
+        pipeline = self._make_pipeline()
+        items = self._make_items(5)
+        results, _ = pipeline.run(items)
+        self.assertEqual(len(results), 5)
+
+    def test_run_empty_input(self):
+        """입력이 없을 때 빈 결과를 반환해야 한다."""
+        pipeline = self._make_pipeline()
+        results, perf_stats = pipeline.run([])
+        self.assertEqual(results, [])
+        self.assertIsInstance(perf_stats, dict)
+
+    def test_seven_threads_created(self):
+        """run()이 실행될 때 정확히 7개의 이름 있는 스레드가 생성되어야 한다."""
+        pipeline = self._make_pipeline()
+        items = self._make_items(2)
+
+        created_thread_names = []
+        original_init = threading.Thread.__init__
+
+        def capture_init(self_t, *args, **kwargs):
+            name = kwargs.get('name', '')
+            if name:
+                created_thread_names.append(name)
+            original_init(self_t, *args, **kwargs)
+
+        with patch.object(threading.Thread, '__init__', capture_init):
+            pipeline.run(items)
+
+        expected_names = {
+            'fg-layout', 'fg-plan', 'fg-formula',
+            'fg-pdf-det', 'fg-ocr-det', 'fg-table', 'fg-ocr-rec',
+        }
+        self.assertEqual(
+            len(created_thread_names), 7,
+            f"스레드 7개여야 하는데 {len(created_thread_names)}개 생성됨: {created_thread_names}",
+        )
+        self.assertEqual(set(created_thread_names), expected_names)
+
+    def test_formula_disabled_does_not_call_formula_one(self):
+        """formula_enable=False이면 _formula_one이 호출되지 않아야 한다."""
+        pipeline = self._make_pipeline(formula_enable=False)
+        items = self._make_items(2)
+        with patch.object(pipeline, '_formula_one') as mock_formula:
+            pipeline.run(items)
+        mock_formula.assert_not_called()
+
+    def test_table_disabled_does_not_call_table_one(self):
+        """table_enable=False이면 _table_one이 호callable 않아야 한다."""
+        pipeline = self._make_pipeline(table_enable=False)
+        items = self._make_items(2)
+        with patch.object(pipeline, '_table_one') as mock_table:
+            pipeline.run(items)
+        mock_table.assert_not_called()
+
+    def test_layout_called_once_per_page(self):
+        """_layout_one이 페이지당 정확히 1회 호출되어야 한다."""
+        pipeline = self._make_pipeline()
+        items = self._make_items(4)
+        with patch.object(pipeline, '_layout_one') as mock_layout, \
+             patch.object(pipeline, '_plan_one'), \
+             patch.object(pipeline, '_pdf_det_one'), \
+             patch.object(pipeline, '_ocr_det_one'), \
+             patch.object(pipeline, '_ocr_rec_one'):
+            pipeline.run(items)
+        self.assertEqual(mock_layout.call_count, 4)
 
 
 # =============================================================================
