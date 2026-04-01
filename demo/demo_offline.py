@@ -495,7 +495,8 @@ if __name__ == '__main__':
     __dir__ = os.path.dirname(os.path.abspath(__file__))
     pdf_files_dir = os.path.join(__dir__, "pdfs")
     # pdf_files_dir = os.path.join(__dir__, "images") # 이미지를 input으로 넣었을 때 정확도 이슈 큼 -> 진행하지 않겠음.
-    output_dir = os.path.join(__dir__, "output-offline")
+    _output_suffix = {False: 'no_async', True: 'async', 'finegrained': 'finegrained'}
+    output_dir = os.path.join(__dir__, f"output-offline-{_output_suffix.get(args.pipeline_mode, str(args.pipeline_mode))}")
     pdf_suffixes = [".pdf"]
     image_suffixes = [".png", ".jpeg", ".jpg"]
 
@@ -511,6 +512,7 @@ if __name__ == '__main__':
     logger.info(f"Table recognition: {'enabled' if TABLE_ENABLE else 'disabled'}")
     _mode_label = {False: 'sync', True: 'async (TrueAsyncPipeline)', 'finegrained': 'finegrained (7-stage streaming)'}
     logger.info(f"Pipeline mode: {_mode_label.get(args.pipeline_mode, str(args.pipeline_mode))}")
+    logger.info(f"Output dir   : {output_dir}")
     logger.info("-" * 80)
     logger.info("Engine configuration:")
     logger.info(f"  Layout  Engine: {LAYOUT_ENGINE}")
