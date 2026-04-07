@@ -164,11 +164,7 @@ class TrueAsyncPipeline:
         self._stage_ocr_rec(contexts)           # Stage 7
 
         elapsed = time.perf_counter() - t_total
-        logger.info(
-            f"✅ TrueAsyncPipeline: {total} pages in {elapsed:.2f}s "
-            f"({total / max(elapsed, 0.001):.2f} it/s)"
-        )
-        self._print_perf_summary()
+        self._print_perf_summary(total, elapsed, "TrueAsyncPipeline")
 
         results = [ctx.layout_res for ctx in contexts]
         return results, dict(self.pdf_perf_stats)
@@ -663,38 +659,55 @@ class TrueAsyncPipeline:
             self.pdf_perf_stats[pdf_idx][key]['time'] += per_item * n
             self.pdf_perf_stats[pdf_idx][key]['count'] += n
 
-    def _print_perf_summary(self) -> None:
+    def _print_perf_summary(
+        self,
+        total_pages: int = 0,
+        wall_time: float = 0.0,
+        pipeline_name: str = "",
+    ) -> None:
         if not self.perf_stats:
             return
 
-        total = sum(v['time'] for v in self.perf_stats.values())
-        labels = {
-            'layout':  '📊 Layout  ',
-            'formula': '📐 Formula ',
-            'pdf_det': '📄 PDF-det ',
-            'ocr_det': '🔍 OCR-det ',
-            'table':   '📋 Table   ',
-            'ocr_rec': '✍️  OCR-rec ',
+        total_stage = sum(v['time'] for v in self.perf_stats.values())
+        W = 58
+
+        logger.info("=" * W)
+        title = f"{pipeline_name} PERFORMANCE SUMMARY" if pipeline_name else "PERFORMANCE SUMMARY"
+        logger.info(f"{title:^{W}}")
+        logger.info("=" * W)
+        logger.info(f" {'Pipeline Step':<16} {'Avg Latency':>14} {'Throughput':>14}     ")
+        logger.info("-" * W)
+
+        stage_order = ['layout', 'formula', 'pdf_det', 'ocr_det', 'table', 'ocr_rec']
+        stage_labels = {
+            'layout':  'Layout',
+            'formula': 'Formula',
+            'pdf_det': 'PDF-det',
+            'ocr_det': 'OCR-det',
+            'table':   'Table',
+            'ocr_rec': 'OCR-rec',
         }
-
-        logger.info("=" * 80)
-        logger.info("📈 TrueAsyncPipeline Performance Summary")
-        logger.info("=" * 80)
-
-        for key in ['layout', 'formula', 'pdf_det', 'ocr_det', 'table', 'ocr_rec']:
+        for key in stage_order:
             if key not in self.perf_stats:
                 continue
             s = self.perf_stats[key]
             t, c = s['time'], s['count']
-            pct = t / total * 100 if total > 0 else 0
-            logger.info(
-                f"{labels.get(key, key)} | {t:7.2f}s ({pct:5.1f}%) | "
-                f"{c:4d}it | {t / max(c, 1):.3f} s/it | {c / max(t, 0.001):6.2f} it/s"
-            )
+            avg_ms = (t / max(c, 1)) * 1000
+            fps = c / max(t, 0.001)
+            label = stage_labels.get(key, key)
+            logger.info(f" {label:<16} {avg_ms:>10.2f} ms {fps:>10.1f} FPS")
 
-        logger.info(f"{'─' * 80}")
-        logger.info(f"🔥 Total: {total:.2f}s")
-        logger.info("=" * 80)
+        logger.info("-" * W)
+        logger.info(f" {'Total Stages':<16} {total_stage:>10.2f} s")
+
+        if total_pages > 0 and wall_time > 0:
+            overall_fps = total_pages / wall_time
+            logger.info("-" * W)
+            logger.info(f" {'Total Pages':<16} {total_pages:>14}")
+            logger.info(f" {'Total Time':<16} {wall_time:>12.1f} s")
+            logger.info(f" {'Overall':<16} {overall_fps:>10.1f} pages/s")
+
+        logger.info("=" * W)
 
     # ─────────────── 단일 페이지 처리 메서드 (StreamingPipeline 용) ────────────
 
@@ -1024,13 +1037,8 @@ class StreamingPipeline(TrueAsyncPipeline):
         completed.sort(key=lambda c: (c.pdf_idx, c.page_idx))
 
         elapsed = time.perf_counter() - t_total
-        logger.info(
-            f"✅ StreamingPipeline: {total} pages in {elapsed:.2f}s "
-            f"({total / max(elapsed, 0.001):.2f} it/s)"
-        )
-        # 스트리밍 perf stats를 TrueAsyncPipeline의 perf_stats에 복사해 요약 출력
         self.perf_stats = {k: v for k, v in self._streaming_perf.items()}
-        self._print_perf_summary()
+        self._print_perf_summary(total, elapsed, "StreamingPipeline")
 
         results = [ctx.layout_res for ctx in completed]
         return results, dict(self.pdf_perf_stats)
@@ -1230,12 +1238,8 @@ class FinegrainedStreamingPipeline(StreamingPipeline):
         completed.sort(key=lambda c: (c.pdf_idx, c.page_idx))
 
         elapsed = time.perf_counter() - t_total
-        logger.info(
-            f"✅ FinegrainedStreamingPipeline: {total} pages in {elapsed:.2f}s "
-            f"({total / max(elapsed, 0.001):.2f} it/s)"
-        )
         self.perf_stats = {k: v for k, v in self._streaming_perf.items()}
-        self._print_perf_summary()
+        self._print_perf_summary(total, elapsed, "FinegrainedStreamingPipeline")
 
         results = [ctx.layout_res for ctx in completed]
         return results, dict(self.pdf_perf_stats)

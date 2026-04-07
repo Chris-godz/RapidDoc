@@ -30,6 +30,7 @@ import copy
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 # =============================================================================
@@ -113,6 +114,101 @@ from rapid_doc.model.layout.rapid_layout_self.utils.typings import EngineType as
 from rapid_doc.model.formula.rapid_formula_self import ModelType as FormulaModelType
 from rapid_doc.model.formula.rapid_formula_self.utils.typings import EngineType as FormulaEngineType
 from rapid_doc.model.table.rapid_table_self import ModelType as TableModelType
+
+
+def _build_perf_summary_md(
+    all_pdf_perf_stats: dict,
+    pdf_file_names: list[str],
+    wall_time: float,
+    total_pages: int,
+    pipeline_mode: str = "",
+) -> str:
+    """Performance Summary를 마크다운 문자열로 생성한다."""
+    stage_order = ['layout', 'formula', 'pdf_det', 'ocr_det', 'table', 'ocr_rec']
+    stage_labels = {
+        'layout':  'Layout',
+        'formula': 'Formula',
+        'pdf_det': 'PDF-det',
+        'ocr_det': 'OCR-det',
+        'table':   'Table',
+        'ocr_rec': 'OCR-rec',
+    }
+
+    lines: list[str] = []
+    lines.append(f"# Performance Summary")
+    lines.append("")
+    lines.append(f"- **Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    if pipeline_mode:
+        lines.append(f"- **Pipeline Mode**: {pipeline_mode}")
+    lines.append(f"- **Total Files**: {len(pdf_file_names)}")
+    lines.append(f"- **Total Pages**: {total_pages}")
+    lines.append(f"- **Total Wall Time**: {wall_time:.2f} s")
+    if total_pages > 0 and wall_time > 0:
+        lines.append(f"- **Overall Throughput**: {total_pages / wall_time:.1f} pages/s")
+    lines.append("")
+
+    # Per-PDF 성능 요약
+    for pdf_idx in sorted(all_pdf_perf_stats.keys()):
+        pdf_stats = all_pdf_perf_stats[pdf_idx]
+        pdf_name = pdf_file_names[pdf_idx] if pdf_idx < len(pdf_file_names) else f"PDF #{pdf_idx}"
+        total_stage_time = sum(s['time'] for s in pdf_stats.values())
+
+        lines.append(f"## {pdf_name}")
+        lines.append("")
+        lines.append("| Pipeline Step | Avg Latency | Throughput |")
+        lines.append("|:---|---:|---:|")
+
+        for key in stage_order:
+            if key not in pdf_stats or pdf_stats[key]['time'] <= 0:
+                continue
+            s = pdf_stats[key]
+            t, c = s['time'], s['count']
+            avg_ms = (t / max(c, 1)) * 1000
+            fps = c / max(t, 0.001)
+            label = stage_labels.get(key, key)
+            lines.append(f"| {label} | {avg_ms:.2f} ms | {fps:.1f} FPS |")
+
+        lines.append("")
+        lines.append(f"- **Total Stage Time**: {total_stage_time:.2f} s")
+        page_count = sum(1 for s in pdf_stats.values() if s.get('count', 0) > 0)
+        layout_count = pdf_stats.get('layout', {}).get('count', 0)
+        if layout_count > 0:
+            lines.append(f"- **Pages**: {layout_count}")
+            lines.append(f"- **Avg per Page**: {total_stage_time / layout_count:.2f} s")
+        lines.append("")
+
+    # 전체 집계 (PDF가 2개 이상인 경우)
+    if len(all_pdf_perf_stats) > 1:
+        agg: dict[str, dict] = {}
+        for pdf_stats in all_pdf_perf_stats.values():
+            for key, s in pdf_stats.items():
+                if key not in agg:
+                    agg[key] = {'time': 0.0, 'count': 0}
+                agg[key]['time'] += s['time']
+                agg[key]['count'] += s['count']
+
+        total_stage_time = sum(s['time'] for s in agg.values())
+        lines.append("## Overall (All PDFs)")
+        lines.append("")
+        lines.append("| Pipeline Step | Avg Latency | Throughput |")
+        lines.append("|:---|---:|---:|")
+
+        for key in stage_order:
+            if key not in agg or agg[key]['time'] <= 0:
+                continue
+            s = agg[key]
+            t, c = s['time'], s['count']
+            avg_ms = (t / max(c, 1)) * 1000
+            fps = c / max(t, 0.001)
+            label = stage_labels.get(key, key)
+            lines.append(f"| {label} | {avg_ms:.2f} ms | {fps:.1f} FPS |")
+
+        lines.append("")
+        lines.append(f"- **Total Stage Time**: {total_stage_time:.2f} s")
+        lines.append("")
+
+    return "\n".join(lines)
+
 
 def do_parse(
     output_dir,  # Output directory for storing parsing results
@@ -287,11 +383,10 @@ def do_parse(
     # =========================================================================
     # Measure model inference performance
     # =========================================================================
-    logger.info("=" * 80)
     logger.info("Model inference started")
     start_time = time.time()
     
-    infer_results, all_image_lists, all_page_dicts, lang_list, ocr_enabled_list, *_ = pipeline_doc_analyze(
+    infer_results, all_image_lists, all_page_dicts, lang_list, ocr_enabled_list, all_pdf_perf_stats = pipeline_doc_analyze(
         pdf_bytes_list, 
         parse_method=parse_method, 
         formula_enable=formula_enable,
@@ -304,12 +399,24 @@ def do_parse(
         use_async_pipeline=use_async_pipeline,
     )
     
-    total_time = time.time() - start_time
-    total_pages = sum([len(img_list) for img_list in all_image_lists])
-    logger.info(f"Total inference time: {total_time:.2f}s")
-    logger.info(f"Total pages: {total_pages}it")
-    logger.info(f"Average speed: {total_time/total_pages:.3f} s/it | {total_pages/total_time:.2f} it/s")
-    logger.info("=" * 80)
+    wall_time = time.time() - start_time
+    
+    # Performance Summary를 마크다운 파일로 저장
+    if all_pdf_perf_stats:
+        total_pages = sum(
+            s.get('layout', {}).get('count', 0)
+            for s in all_pdf_perf_stats.values()
+        )
+        mode_labels = {False: 'sync', True: 'async', 'finegrained': 'finegrained'}
+        pipeline_label = mode_labels.get(use_async_pipeline, str(use_async_pipeline))
+        perf_md = _build_perf_summary_md(
+            all_pdf_perf_stats, pdf_file_names, wall_time, total_pages, pipeline_label,
+        )
+        perf_md_path = os.path.join(output_dir, "performance_summary.md")
+        os.makedirs(output_dir, exist_ok=True)
+        with open(perf_md_path, "w", encoding="utf-8") as f:
+            f.write(perf_md)
+        logger.info(f"Performance summary saved to {perf_md_path}")
 
     for idx, model_list in enumerate(infer_results):
         model_json = copy.deepcopy(model_list)

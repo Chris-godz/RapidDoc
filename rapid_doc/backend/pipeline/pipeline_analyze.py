@@ -253,108 +253,52 @@ def doc_analyze(
 
         infer_results[pdf_idx].append(page_dict)
 
-    # PDF별 성능 통계 출력 (batch_analyze에서 이미 출력했지만, 전체 배치 병합 결과 출력)
+    # PDF별 성능 통계 출력
     if all_pdf_perf_stats:
-        logger.info("")
-        logger.info("=" * 80)
-        logger.info("📊 Aggregated performance per PDF (full batch)")
-        logger.info("=" * 80)
-        
-        # 엔진 정보 추출
-        engines = {}
-        if layout_config:
-            engine_type = layout_config.get('engine_type')
-            if hasattr(engine_type, 'value'):
-                engines['layout'] = engine_type.value
-            elif isinstance(engine_type, str):
-                engines['layout'] = engine_type
-            else:
-                engines['layout'] = 'onnxruntime'
-        else:
-            engines['layout'] = 'onnxruntime'
-        
-        if ocr_config:
-            engine_type = ocr_config.get('engine_type') or ocr_config.get('Det.engine_type')
-            if hasattr(engine_type, 'value'):
-                engines['ocr'] = engine_type.value
-            elif isinstance(engine_type, str):
-                engines['ocr'] = engine_type
-            else:
-                engines['ocr'] = 'onnxruntime'
-        else:
-            engines['ocr'] = 'onnxruntime'
-        
-        if formula_config:
-            engine_type = formula_config.get('engine_type')
-            if hasattr(engine_type, 'value'):
-                engines['formula'] = engine_type.value
-            elif isinstance(engine_type, str):
-                engines['formula'] = engine_type
-            else:
-                engines['formula'] = 'onnxruntime'
-        else:
-            engines['formula'] = 'onnxruntime'
-        
-        if table_config:
-            engine_type = table_config.get('engine_type')
-            if hasattr(engine_type, 'value'):
-                engines['table'] = engine_type.value
-            elif isinstance(engine_type, str):
-                engines['table'] = engine_type
-            else:
-                engines['table'] = 'onnxruntime'
-        else:
-            engines['table'] = 'onnxruntime'
-        
-        # 엔진 매핑
-        engine_mapping = {
-            'layout': engines.get('layout', 'unknown'),
-            'formula': engines.get('formula', 'unknown'),
-            'pdf_det': engines.get('ocr', 'unknown'),
-            'ocr_det': engines.get('ocr', 'unknown'),
-            'table': engines.get('table', 'unknown'),
-            'ocr_rec': engines.get('ocr', 'unknown')
-        }
-        
         # 페이지 수 계산
         pdf_page_counts = {}
         for pdf_idx, _, _, _, _, _ in all_pages_info:
             pdf_page_counts[pdf_idx] = pdf_page_counts.get(pdf_idx, 0) + 1
-        
+
+        W = 58
+        stage_order = ['layout', 'formula', 'pdf_det', 'ocr_det', 'table', 'ocr_rec']
+        stage_labels = {
+            'layout':  'Layout',
+            'formula': 'Formula',
+            'pdf_det': 'PDF-det',
+            'ocr_det': 'OCR-det',
+            'table':   'Table',
+            'ocr_rec': 'OCR-rec',
+        }
+
         for pdf_idx in sorted(all_pdf_perf_stats.keys()):
             pdf_stats = all_pdf_perf_stats[pdf_idx]
-            total_time = sum(model_stats['time'] for model_stats in pdf_stats.values())
+            total_time = sum(s['time'] for s in pdf_stats.values())
             page_count = pdf_page_counts.get(pdf_idx, 0)
-            
-            logger.info(f"\n📄 PDF #{pdf_idx}: {page_count} pages, total time: {total_time:.2f}s")
-            logger.info("-" * 80)
-            
-            # 모델별 통계 출력
-            model_names = {
-                'layout': '📊 Layout  ',
-                'formula': '📐 Formula ',
-                'pdf_det': '📄 PDF-det ',
-                'ocr_det': '🔍 OCR-det ',
-                'table': '📋 Table   ',
-                'ocr_rec': '✍️  OCR-rec '
-            }
-            
-            for key in ['layout', 'formula', 'pdf_det', 'ocr_det', 'table', 'ocr_rec']:
-                if key in pdf_stats and pdf_stats[key]['time'] > 0:
-                    model_stats = pdf_stats[key]
-                    time_val = model_stats['time']
-                    count = model_stats['count']
-                    percentage = (time_val / total_time * 100) if total_time > 0 else 0
-                    s_per_it = time_val / count if count > 0 else 0
-                    it_per_s = count / time_val if time_val > 0 else 0
-                    engine = engine_mapping.get(key, 'unknown')
-                    
-                    logger.info(
-                        f"{model_names.get(key, key)} [{engine:>12s}] | {time_val:7.2f}s ({percentage:5.1f}%) | "
-                        f"{int(count):4d}it | {s_per_it:.3f} s/it | {it_per_s:6.2f} it/s"
-                    )
-        
-        logger.info("=" * 80)
+
+            logger.info("=" * W)
+            title = f"PDF #{pdf_idx} PERFORMANCE SUMMARY"
+            logger.info(f"{title:^{W}}")
+            logger.info("=" * W)
+            logger.info(f" {'Pipeline Step':<16} {'Avg Latency':>14} {'Throughput':>14}     ")
+            logger.info("-" * W)
+
+            for key in stage_order:
+                if key not in pdf_stats or pdf_stats[key]['time'] <= 0:
+                    continue
+                s = pdf_stats[key]
+                t, c = s['time'], s['count']
+                avg_ms = (t / max(c, 1)) * 1000
+                fps = c / max(t, 0.001)
+                label = stage_labels.get(key, key)
+                logger.info(f" {label:<16} {avg_ms:>10.2f} ms {fps:>10.1f} FPS")
+
+            logger.info("-" * W)
+            logger.info(f" {'Total Stages':<16} {total_time:>10.2f} s")
+            if page_count > 0 and total_time > 0:
+                logger.info(f" {'Total Pages':<16} {page_count:>14}")
+                logger.info(f" {'Avg per Page':<16} {total_time / page_count:>10.2f} s")
+            logger.info("=" * W)
 
     return infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled_list, all_pdf_perf_stats
 
