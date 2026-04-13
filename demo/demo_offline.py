@@ -412,11 +412,19 @@ def do_parse(
         perf_md = _build_perf_summary_md(
             all_pdf_perf_stats, pdf_file_names, wall_time, total_pages, pipeline_label,
         )
-        perf_md_path = os.path.join(output_dir, "performance_summary.md")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        perf_md_path = os.path.join(output_dir, f"performance_summary_{timestamp}.md")
         os.makedirs(output_dir, exist_ok=True)
         with open(perf_md_path, "w", encoding="utf-8") as f:
             f.write(perf_md)
-        logger.info(f"Performance summary saved to {perf_md_path}")
+        _perf_md_saved_path = perf_md_path
+    else:
+        _perf_md_saved_path = None
+
+    if use_async_pipeline in (True, 'finegrained'):
+        middle_ocr_config = {**(ocr_config or {}), 'use_async': True}
+    else:
+        middle_ocr_config = ocr_config
 
     for idx, model_list in enumerate(infer_results):
         model_json = copy.deepcopy(model_list)
@@ -430,7 +438,7 @@ def do_parse(
         _ocr_enable = ocr_enabled_list[idx]
         middle_json = pipeline_result_to_middle_json(
             model_list, images_list, pdf_dict, image_writer, _lang, _ocr_enable, 
-            formula_enable, ocr_config=ocr_config, image_config=image_config
+            formula_enable, ocr_config=middle_ocr_config, image_config=image_config
         )
 
         pdf_info = middle_json["pdf_info"]
@@ -478,6 +486,8 @@ def do_parse(
 
         logger.info(f"local output dir is {local_md_dir}")
 
+    return _perf_md_saved_path
+
 
 def parse_doc(
         path_list: list[Path],
@@ -517,7 +527,7 @@ def parse_doc(
             pdf_bytes = read_fn(path)
             file_name_list.append(file_name)
             pdf_bytes_list.append(pdf_bytes)
-        do_parse(
+        return do_parse(
             output_dir=output_dir,
             pdf_file_names=file_name_list,
             pdf_bytes_list=pdf_bytes_list,
@@ -680,10 +690,10 @@ examples:
     logger.info(f"  Table   Engine: {TABLE_ENGINE}")
     logger.info("=" * 80)
     
-    parse_doc(
-        doc_path_list, 
-        output_dir, 
-        formula_enable=FORMULA_ENABLE, 
+    perf_md_path = parse_doc(
+        doc_path_list,
+        output_dir,
+        formula_enable=FORMULA_ENABLE,
         table_enable=TABLE_ENABLE,
         layout_engine=LAYOUT_ENGINE,
         ocr_engine=OCR_ENGINE,
@@ -692,3 +702,7 @@ examples:
         formula_rec_enable=FORMULA_REC_ENABLE,
         use_async_pipeline=args.pipeline_mode,
     )
+    if perf_md_path:
+        logger.info("=" * 80)
+        logger.info(f"Performance summary saved: {perf_md_path}")
+        logger.info("=" * 80)

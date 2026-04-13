@@ -1361,11 +1361,6 @@ def finegrained_streaming_batch_image_analyze(
     )
 
     results, pdf_perf_stats = pipeline.run(images_with_extra_info)
-
-    # 7개 스레드가 동시에 AtomModelSingleton에 모델을 적재하므로
-    # 후처리 단계에서 NPU OOM이 발생할 수 있음.
-    # 파이프라인 완료 후 캐시를 명시적으로 해제해 NPU 메모리를 반환한다.
-    AtomModelSingleton._models.clear()
     clean_memory(get_device())
 
     return results, pdf_perf_stats
