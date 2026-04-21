@@ -65,19 +65,10 @@ class PPDocLayoutModelHandler(BaseModelHandler):
 
     def __call__(self, ori_img_list: List[np.ndarray]) -> List[RapidLayoutOutput]:
         """
-        이미지 리스트를 처리하여 레이아웃 분석 결과 반환
-        
-        엔진 타입과 비동기 설정에 따라 처리 방식 자동 선택:
-        - DXEngine + Async: 페이지별 비동기 병렬 처리
-        - 그 외: 기존 배치 처리
+        Process image list and return layout analysis results.
+        Always use sync processing (callback-based async causes segfault in DX Engine worker threads)
         """
-        # DX Engine + Async 모드인 경우 페이지별 비동기 처리
-        if (self.engine_type == EngineType.DXENGINE and 
-            hasattr(self.session, 'use_async') and 
-            self.session.use_async):
-            return self._process_async(ori_img_list)
-        else:
-            return self._process_sync(ori_img_list)
+        return self._process_sync(ori_img_list)
     
     def _process_sync(self, ori_img_list: List[np.ndarray]) -> List[RapidLayoutOutput]:
         """동기 방식 배치 처리 (기존 방식)"""
@@ -119,9 +110,6 @@ class PPDocLayoutModelHandler(BaseModelHandler):
         start_time = time.perf_counter()
         num_pages = len(ori_img_list)
         
-        # 디버깅: 현재 처리할 페이지 수 출력
-        print(f"[Layout Async] Starting new batch: {num_pages} pages")
-        
         # 이미지 리스트를 로컬 복사하여 클로저 문제 방지
         local_img_list = list(ori_img_list)
         
@@ -136,11 +124,8 @@ class PPDocLayoutModelHandler(BaseModelHandler):
             """단일 페이지 추론 완료 콜백 - outputs는 run_async가 전달"""
             nonlocal pending_count
             try:
-                # 디버깅: 페이지 인덱스와 전체 페이지 수 확인
-                print(f"[Layout Callback] page_idx={page_idx}, total_pages={total_pages}, img_shape={ori_img.shape}")
                 
                 if page_idx >= total_pages:
-                    print(f"[Layout] ERROR: page_idx={page_idx} >= total_pages={total_pages}")
                     raise IndexError(f"page_idx {page_idx} out of range for {total_pages} pages")
                 
                 # 후처리
@@ -198,8 +183,6 @@ class PPDocLayoutModelHandler(BaseModelHandler):
         for idx, ori_img in enumerate(local_img_list):
             page_start = time.perf_counter()
             page_start_times[idx] = page_start
-            # 디버깅: 제출할 페이지 정보
-            print(f"[Layout Submit] page_idx={idx}/{num_pages}, img_shape={ori_img.shape}")
             # 전처리
             ori_img_shape = ori_img.shape[:2]
             img = self.preprocess(ori_img)

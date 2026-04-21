@@ -15,7 +15,7 @@ class DXInferSession(InferSession):
     def __init__(self, cfg: RapidLayoutInput):
         super().__init__(cfg)
         self.logger = Logger(logger_name=__name__).get_log()
-        # cfg에서 use_async 추출
+        # Extract use_async from cfg
         self.use_async = cfg.use_async if hasattr(cfg, 'use_async') else False
 
         if cfg.model_dir_or_path is None:
@@ -30,21 +30,22 @@ class DXInferSession(InferSession):
         self.session = InferenceEngine(str(self.model_path))
         self.sub_session = InferenceSession(str(cfg.sub_model_path))
         
-        # Async callback 지원을 위한 추가 속성
+        # Additional attributes for async callback support
         self.pending_requests = {}  # request_id -> (input_content, scale_factor, callback)
         self.lock = threading.Lock()
-        self._request_counter = 0  # thread-safe 카운터
+        self._request_counter = 0  # thread-safe counter
         
-        # Async 모드일 때만 Callback 등록
+        # DX Engine callbacks invoke Python from C++ worker threads,
+        # which can cause segfaults due to GIL contention, so we do not register them.
+        # Instead, we use the run_async + session.wait pattern.
         if self.use_async:
-            self.session.register_callback(self._on_inference_complete)
-            self.logger.info("DXInferSession initialized in ASYNC mode")
+            self.logger.info("DXInferSession initialized in ASYNC mode (wait-based, no callback)")
         else:
             self.logger.info("DXInferSession initialized in SYNC mode")
         
     def _on_inference_complete(self, outputs: List[np.ndarray], user_arg: Any) -> int:
         """
-        DX Engine 추론 완료 시 호출되는 콜백
+        Callback invoked when DX Engine inference completes
         
         Args:
             outputs: DX Engine 출력 결과
@@ -56,7 +57,7 @@ class DXInferSession(InferSession):
         try:
             unique_id, input_content, scale_factor, callback = user_arg
             
-            # ONNX 후처리 실행
+            # Run ONNX post-processing
             shape = np.array(input_content.shape[1:-1])[None, ...].astype(np.float32)  # N, H, W, C -> H, W
             ort_feed = {
                 "p2o.pd_op.concat.12.0": outputs[0],
@@ -66,7 +67,7 @@ class DXInferSession(InferSession):
             }
             ort_outputs = self.sub_session.run(None, ort_feed)
             
-            # 사용자 콜백 호출 (있는 경우)
+            # Invoke user callback (if provided)
             if callback is not None:
                 callback(ort_outputs, unique_id)
                 
@@ -77,25 +78,20 @@ class DXInferSession(InferSession):
     
     def __call__(self, input_content: np.ndarray, scale_factor: np.ndarray) -> np.ndarray:
         if self.use_async:
-            self.request_id = self.run_async(input_content=input_content, scale_factor=scale_factor)
-            return np.array([0])
+            request_id = self.session.run_async([input_content], user_arg=None)
+            outputs = self.session.wait(request_id)
         else:
-            """
-            동기 방식 추론 (기존 호환성 유지)
-            일반 run() 사용
-            """
-            # Sync mode: 동기 run 호출
             outputs = self.session.run([input_content])
-            
-            shape = np.array(input_content.shape[1:-1])[None, ...].astype(np.float32)  # N, H, W, C -> H, W
-            ort_feed = {
-                "p2o.pd_op.concat.12.0": outputs[0],
-                "p2o.pd_op.layer_norm.20.0": outputs[1],
-                "im_shape": shape,
-                "scale_factor": scale_factor
-            }
-            ort_outputs = self.sub_session.run(None, ort_feed)
-            return ort_outputs
+        
+        shape = np.array(input_content.shape[1:-1])[None, ...].astype(np.float32)
+        ort_feed = {
+            "p2o.pd_op.concat.12.0": outputs[0],
+            "p2o.pd_op.layer_norm.20.0": outputs[1],
+            "im_shape": shape,
+            "scale_factor": scale_factor
+        }
+        ort_outputs = self.sub_session.run(None, ort_feed)
+        return ort_outputs
     
     def run_async(self, input_content: np.ndarray, scale_factor: np.ndarray, 
                   callback: Optional[Callable] = None) -> int:

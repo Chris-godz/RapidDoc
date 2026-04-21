@@ -276,12 +276,12 @@ def do_parse(
         # rapidocr may try to download fonts if missing, but urllib is blocked
         # above so it will error and proceed with default behavior.
         
-        # 추가 설정
+        # Additional settings
         # "Rec.rec_batch_num": 1,
-        "use_det_mode": 'auto',  # auto: PDF 추출 우선 → OCR | txt: PDF만 | ocr: 무조건 OCR
+        "use_det_mode": parse_method,  # auto: PDF extraction first → OCR | txt: PDF only | ocr: always OCR
         "engine_type": "dxengine",
         
-        # 기본 단일 모델 경로 (fallback용 - multi-model 사용 시에도 필요)
+        # Default single model path (fallback - also needed when using multi-model)
         "Det.model_path": str(dxnn_models_dir / "det_v5_640_640.dxnn"),
         "Rec.model_path": str(dxnn_models_dir / "rec_v5_ratio_10.dxnn"),
         
@@ -343,26 +343,29 @@ def do_parse(
     # =========================================================================
     table_config = {}
     
-    # Table model_type selection
-    # UNET: no paddle_cls needed, detects ruled tables only
-    # UNET_SLANET_PLUS: needs paddle_cls, handles ruled/unruled tables (default)
-    table_config["model_type"] = TableModelType.UNET
-    logger.info("Table model type: UNET (no paddle_cls, ruled tables only)")
+    # UNET_SLANET_PLUS: classify wired/wireless via paddle_cls, then process each
+    # Currently wireless model also uses UNET DX Engine (can be replaced with slanet_plus ONNX later)
+    table_config["model_type"] = TableModelType.UNET_SLANET_PLUS
+    table_config["wireless_model_type"] = "unet"
+    # cls.model_dir_or_path=None → TableCls auto-downloads from ModelScope (table_cls/models/)
     
     # Engine-specific Table settings
     if table_engine.lower() == "dxengine":
         table_config["engine_type"] = "dxengine"
-        table_config["model_dir_or_path"] = str(dxnn_models_dir / "unet.dxnn")
-        logger.info("Table engine: DX Engine")
+        table_config["unet.model_dir_or_path"] = str(dxnn_models_dir / "unet.dxnn")
+        table_config["wireless_engine_type"] = "dxengine"
+        table_config["slanet_plus.model_dir_or_path"] = str(dxnn_models_dir / "unet.dxnn")
+        logger.info("Table model: UNET_SLANET_PLUS (wired=DX, wireless=DX/UNET, cls=ONNX)")
     elif table_engine.lower() == "torch":
         table_config["engine_type"] = "torch"
-        logger.info("Table engine: PyTorch")
+        table_config["wireless_engine_type"] = "torch"
+        logger.info("Table model: UNET_SLANET_PLUS (wired=Torch, wireless=Torch)")
     else:  # onnxruntime (default)
         table_config["engine_type"] = "onnxruntime"
-        table_config["model_dir_or_path"] = str(onnx_models_dir / "unet.onnx")
-        logger.info("Table engine: ONNX Runtime")
-    
-    # UNET 모델 경로 설정
+        table_config["unet.model_dir_or_path"] = str(onnx_models_dir / "unet.onnx")
+        table_config["wireless_engine_type"] = "onnxruntime"
+        table_config["slanet_plus.model_dir_or_path"] = str(onnx_models_dir / "unet.onnx")
+        logger.info("Table model: UNET_SLANET_PLUS (wired=ONNX, wireless=ONNX/UNET)")
 
     checkbox_config = {
         # 체크박스 인식 (OpenCV 기반, 오검출 가능성 있음)
@@ -590,6 +593,10 @@ examples:
         help='결과 저장 디렉토리 (기본: demo/output-offline-{mode}/)',
         metavar='DIR',
     )
+    parser.add_argument(
+        '--force-ocr', action='store_true', default=False,
+        help='Ignore PDF text metadata and always use image→OCR path (for model evaluation)',
+    )
     parser.set_defaults(pipeline_mode=False)  # Default: sync mode
     args = parser.parse_args()
     
@@ -679,6 +686,7 @@ examples:
     logger.info(f"Formula recognition: {'enabled' if FORMULA_ENABLE else 'disabled'}"
                 + ("" if FORMULA_REC_ENABLE else " (rec disabled — image only)"))
     logger.info(f"Table recognition: {'enabled' if TABLE_ENABLE else 'disabled'}")
+    logger.info(f"Parse method: {'ocr (force-ocr, no PDF metadata)' if args.force_ocr else 'auto'}")
     _mode_label = {False: 'sync', True: 'async (TrueAsyncPipeline)', 'finegrained': 'finegrained (7-stage streaming)'}
     logger.info(f"Pipeline mode: {_mode_label.get(args.pipeline_mode, str(args.pipeline_mode))}")
     logger.info(f"Output dir   : {output_dir}")
@@ -693,6 +701,7 @@ examples:
     perf_md_path = parse_doc(
         doc_path_list,
         output_dir,
+        method="ocr" if args.force_ocr else "auto",
         formula_enable=FORMULA_ENABLE,
         table_enable=TABLE_ENABLE,
         layout_engine=LAYOUT_ENGINE,

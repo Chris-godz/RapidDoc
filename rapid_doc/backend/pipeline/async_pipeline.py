@@ -502,30 +502,13 @@ class TrueAsyncPipeline:
         ctx: PageContext,
         ti: dict,
     ) -> list:
-        """테이블 영역의 OCR 결과를 [boxes, texts, scores] 형태로 반환한다."""
-        adjusted = get_adjusted_mfdetrec_res(
-            ctx.formula_regions + ctx.checkbox_res,
-            ti['useful_list'],
-            return_text=True,
-        )
-        new_table_img = cv2.cvtColor(np.asarray(ti['table_img']), cv2.COLOR_RGB2BGR)
-        raw_ocr = ocr_model_for_table.ocr(new_table_img, mfd_res=adjusted, rec=False)[0] or []
+        """Return OCR results for table regions as [boxes, texts, scores].
 
-        most_angle = txt_most_angle_extract_table(ctx.page_dict, ti, scale=ctx.scale)
-        if most_angle in [90, 270] and raw_ocr:
-            ti['table_img'], raw_ocr = rotate_image_and_boxes(
-                np.asarray(ti['table_img']), raw_ocr, most_angle
-            )
-
-        if not raw_ocr:
-            return [[], [], []]
-
-        ocr_spans = get_ocr_result_list_table(raw_ocr, ti['useful_list'], ctx.scale)
-        if not ocr_spans:
-            return [[], [], []]
-        return [list(x) for x in zip(*[
-            [s['ori_bbox'], s['content'], s['score']] for s in ocr_spans
-        ])]
+        NOTE: det-only(rec=False) results have empty text, which causes
+        the table model to skip its own OCR — a bug. Return None so that
+        rapid_table internally runs det+rec OCR instead.
+        """
+        return None
 
     def _stage_table(self, contexts: List[PageContext]) -> None:
         """

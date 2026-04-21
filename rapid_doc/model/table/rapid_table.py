@@ -59,14 +59,21 @@ class RapidTableModel(object):
             self.wireless_table_model = RapidTable(wireless_input_args)
         elif self.model_type == ModelType.UNET_SLANET_PLUS:
             self.table_cls = TableCls(model_path=table_config.get("cls.model_dir_or_path"))
+            engine_type = table_config.get("engine_type")
             wired_input_args = RapidTableInput(model_type=ModelType.UNET, use_ocr=False,
                                                model_dir_or_path=table_config.get("unet.model_dir_or_path"),
                                                engine_cfg=engine_cfg or {},
+                                               engine_type=engine_type,
                                                use_async=self.use_async)
             self.wired_table_model = RapidTable(wired_input_args)
-            wireless_input_args = RapidTableInput(model_type=ModelType.SLANETPLUS, use_ocr=False,
+            wireless_type_val = table_config.get("wireless_model_type", ModelType.SLANETPLUS.value)
+            wireless_model_type = ModelType(wireless_type_val) if isinstance(wireless_type_val, str) else wireless_type_val
+            wireless_engine_type = table_config.get("wireless_engine_type")
+            wireless_input_args = RapidTableInput(model_type=wireless_model_type, use_ocr=False,
                                                   model_dir_or_path=table_config.get("slanet_plus.model_dir_or_path"),
-                                                  engine_cfg=engine_cfg or {}, )
+                                                  engine_cfg=engine_cfg or {},
+                                                  engine_type=wireless_engine_type,
+                                                  use_async=self.use_async)
             self.wireless_table_model = RapidTable(wireless_input_args)
         elif self.model_type == ModelType.UNET_UNITABLE:
             self.table_cls = TableCls(model_path=table_config.get("cls.model_dir_or_path"))

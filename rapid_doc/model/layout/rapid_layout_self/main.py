@@ -33,21 +33,13 @@ class RapidLayout:
         img_contents = [self.load_img(img_content) for img_content in img_contents]
         batch_results = []
         
-        # DX Engine Async 모드인 경우 배치 분할 건너뛰기
-        # (ModelHandler에서 페이지별 병렬 처리 수행)
-        if (hasattr(self.session, 'use_async') and self.session.use_async):
-            # Async 모드: 전체를 한 번에 전달
-            results = self.model_handler(img_contents)
-            batch_results.extend(results)
-        else:
-            # Sync 모드: 기존 배치 처리
-            with tqdm(total=len(img_contents), desc="Layout Predict", disable=not tqdm_enable) as pbar:
-                # 分批处理
-                for i in range(0, len(img_contents), batch_size):
-                    batch_imgs = img_contents[i:i + batch_size]
-                    results = self.model_handler(batch_imgs)
-                    batch_results.extend(results)
-                    pbar.update(len(batch_imgs))  # 用实际处理的数量更新进度条
+        # Always use sync batch processing (callback-based async causes segfault)
+        with tqdm(total=len(img_contents), desc="Layout Predict", disable=not tqdm_enable) as pbar:
+            for i in range(0, len(img_contents), batch_size):
+                batch_imgs = img_contents[i:i + batch_size]
+                results = self.model_handler(batch_imgs)
+                batch_results.extend(results)
+                pbar.update(len(batch_imgs))
 
         return batch_results
 

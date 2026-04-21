@@ -95,6 +95,7 @@ class DxTextDetector:
         # request_id -> {'ori_shape': (h, w), 'target_size': (h, w), 'start_time': float}
         self.pending_requests = {}
         self.lock = threading.Lock()
+        self._infer_lock = threading.Lock()  # Prevent concurrent access to DX Engine session
         self._request_counter = 0  # thread-safe 카운터
         self._callback_session_ids = set()
         
@@ -230,22 +231,13 @@ class DxTextDetector:
     def __call__(self, img: np.ndarray):
         """
         텍스트 검출 실행 (동기/비동기 자동 선택)
-        
-        Args:
-            img: 입력 이미지 (numpy array)
-            
-        Returns:
-            DetResult: 검출 결과 (boxes, elapse)
         """
-        if self.use_async:
-            # Async 모드: run_async 호출 후 즉시 대기
-            # 주의: 이 방식은 진정한 비동기가 아니며, 호출자가 직접 run_async + wait_request를 사용해야 함
-            request_id = self.run_async(img, callback=None)
-            
-            return self.wait_request(request_id)
-        else:
-            # Sync 모드: 기존 동기 처리
-            return self.run(img)
+        with self._infer_lock:
+            if self.use_async:
+                request_id = self.run_async(img, callback=None)
+                return self.wait_request(request_id)
+            else:
+                return self.run(img)
     
     def run(self, img: np.ndarray):
         """
@@ -324,8 +316,6 @@ class DxTextDetector:
             request_id: 요청 ID
         """
         start_time = time.time()
-        
-        print(f"[OCR Det] run_async called, img_shape={img.shape}")
         
         if self.use_multi_det_model:
             # Multi-model detection: ratio에 따라 모델 선택
@@ -725,6 +715,7 @@ class DxTextRecognizer:
         # request_id -> True (콜백 미사용 요청 추적)
         self.pending_requests = {}
         self.rec_lock = threading.Lock()
+        self._infer_lock = threading.Lock()  # Prevent concurrent access to DX Engine session
         self._request_counter = 0  # thread-safe 카운터
         self._callback_registered = False
         
@@ -805,37 +796,24 @@ class DxTextRecognizer:
         self._callback_registered = True
     
     def __call__(self, img_list: List[np.ndarray]) -> 'RecResult':
-        """
-        텍스트 인식 실행 (동기/비동기 자동 선택)
-        
-        Args:
-            img_list: 입력 이미지 리스트
-            
-        Returns:
-            RecResult: 인식 결과 (txts, scores, elapse)
-        """
-        if self.use_async:
-            # Async 모드: 배치를 개별 요청으로 분할 후 대기
-            # 주의: 이 방식은 진정한 비동기가 아니며, 호출자가 직접 run_async를 사용해야 함
-            request_ids = self.recognize_batch_async(img_list, callback=None)
-            
-            # 모든 요청 완료 대기
-            all_txts = []
-            all_scores = []
-            for req_id in request_ids:
-                result = self.wait_request(req_id)
-                if result:
-                    text, score = result
-                    all_txts.append(text)
-                    all_scores.append(score)
-                else:
-                    all_txts.append("")
-                    all_scores.append(0.0)
-            
-            return RecResult(txts=all_txts, scores=all_scores, elapse=0.0)
-        else:
-            # Sync 모드: 기존 동기 처리
-            return self.run(img_list)
+        """Run text recognition (auto-selects sync/async)"""
+        with self._infer_lock:
+            if self.use_async:
+                request_ids = self.recognize_batch_async(img_list, callback=None)
+                all_txts = []
+                all_scores = []
+                for req_id in request_ids:
+                    result = self.wait_request(req_id)
+                    if result:
+                        text, score = result
+                        all_txts.append(text)
+                        all_scores.append(score)
+                    else:
+                        all_txts.append("")
+                        all_scores.append(0.0)
+                return RecResult(txts=all_txts, scores=all_scores, elapse=0.0)
+            else:
+                return self.run(img_list)
     
     def run(self, img_list: List[np.ndarray]) -> 'RecResult':
         """
@@ -1336,7 +1314,6 @@ class DxOcrModel:
                     img = preprocess_image(img)
                     ori_im = img.copy()
                     
-                    # Save detection input image if debug enabled
                     if self.save_debug_images:
                         det_input_path = f"{self.debug_save_dir}/det_input/det_input_{self.debug_counter:06d}.jpg"
                         cv2.imwrite(det_input_path, img)
@@ -1357,7 +1334,6 @@ class DxOcrModel:
                     if mfd_res:
                         dt_boxes = update_det_boxes(dt_boxes, mfd_res)
                     
-                    # Draw bboxes on image if debug enabled
                     if self.save_debug_images:
                         img_with_boxes = ori_im.copy()
                         for box in dt_boxes:
@@ -1365,8 +1341,6 @@ class DxOcrModel:
                             cv2.polylines(img_with_boxes, [box], True, (0, 255, 0), 2)
                         det_bbox_path = f"{self.debug_save_dir}/det_input/det_bbox_{self.debug_counter:06d}.jpg"
                         cv2.imwrite(det_bbox_path, img_with_boxes)
-                        
-                        # Increment counter
                         self.debug_counter += 1
                     
                     tmp_res = [box.tolist() for box in dt_boxes]
@@ -1380,34 +1354,25 @@ class DxOcrModel:
                         img = preprocess_image(img)
                         img = [img]
                     
-                    # Multi-model recognition 사용 여부에 따라 분기
                     if self.use_multi_rec_model:
-                        # Multi-model recognition: ratio 기반 모델 선택
                         rec_results = []
                         for crop_idx, crop_img in enumerate(img):
-                            # Save cropped image if debug enabled
-                            
                             h, w = crop_img.shape[:2]
                             ratio = self.rec_router(w, h)
                             
-                            # Get recognizer for this ratio
                             if ratio in self.rec_recognizer_map:
                                 recognizer = self.rec_recognizer_map[ratio]
-                                
-                                # Use dedicated recognizer (already configured with correct size)
                                 rec_result = recognizer([crop_img])
                                 
                                 if rec_result.txts and len(rec_result.txts) > 0:
                                     text, score = rec_result.txts[0], rec_result.scores[0]
                                     rec_results.append((text, score))
-
                                     if self.save_debug_images:
                                         crop_path = f"{self.debug_save_dir}/rec_crops/rec_crop_{self.debug_counter:06d}_{crop_idx:03d}.jpg"
                                         cv2.imwrite(crop_path, crop_img)
                                 else:
                                     rec_results.append(("", 0.0))
                             else:
-                                # Fallback to default recognizer
                                 rec_result = self.text_recognizer([crop_img])
                                 if rec_result.txts and len(rec_result.txts) > 0:
                                     rec_results.append((rec_result.txts[0], rec_result.scores[0]))
@@ -1419,9 +1384,7 @@ class DxOcrModel:
                         
                         ocr_res.append(rec_results)
                     else:
-                        # Single model recognition
                         for crop_idx, crop_img in enumerate(img):
-                            # Save cropped image if debug enabled
                             if self.save_debug_images:
                                 crop_path = f"{self.debug_save_dir}/rec_crops/rec_crop_{self.debug_counter:06d}_{crop_idx:03d}.jpg"
                                 cv2.imwrite(crop_path, crop_img)
@@ -1436,16 +1399,7 @@ class DxOcrModel:
                 return ocr_res
     
     def __call__(self, img, mfd_res=None):
-        """
-        검출 + 인식 실행
-        
-        Args:
-            img: 입력 이미지
-            mfd_res: MFD 결과
-            
-        Returns:
-            (dt_boxes, rec_res): 검출 박스와 인식 결과
-        """
+        """Run detection + recognition (each protected by _infer_lock in DxTextDetector/DxTextRecognizer)"""
         logger.info(f"🔍 DX OCR __call__ invoked | save_debug_images={self.save_debug_images} | counter={self.debug_counter}")
         
         if img is None:
