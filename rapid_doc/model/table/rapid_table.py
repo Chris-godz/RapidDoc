@@ -1,4 +1,5 @@
 import html
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -32,8 +33,8 @@ class RapidTableModel(object):
         self.ocr_engine = ocr_engine
 
         if self.model_type == ModelType.SLANEXT:
-            # 有线/无线 单元格识别
-            self.table_cls = TableCls(model_path=table_config.get("cls.model_dir_or_path"))
+            # 有线/无线 단元格识别
+            self.table_cls = self._try_load_table_cls(table_config)
             wired_cell_args = RapidLayoutInput(model_type=LayoutModelType.RT_DETR_L_WIRED_TABLE_CELL_DET,
                                                model_dir_or_path=table_config.get("wired_cell.model_dir_or_path"),
                                                conf_thresh=0.3,
@@ -58,7 +59,7 @@ class RapidTableModel(object):
                                                   use_async=self.use_async)
             self.wireless_table_model = RapidTable(wireless_input_args)
         elif self.model_type == ModelType.UNET_SLANET_PLUS:
-            self.table_cls = TableCls(model_path=table_config.get("cls.model_dir_or_path"))
+            self.table_cls = self._try_load_table_cls(table_config)
             engine_type = table_config.get("engine_type")
             wired_input_args = RapidTableInput(model_type=ModelType.UNET, use_ocr=False,
                                                model_dir_or_path=table_config.get("unet.model_dir_or_path"),
@@ -76,7 +77,7 @@ class RapidTableModel(object):
                                                   use_async=self.use_async)
             self.wireless_table_model = RapidTable(wireless_input_args)
         elif self.model_type == ModelType.UNET_UNITABLE:
-            self.table_cls = TableCls(model_path=table_config.get("cls.model_dir_or_path"))
+            self.table_cls = self._try_load_table_cls(table_config)
             wired_input_args = RapidTableInput(model_type=ModelType.UNET, use_ocr=False,
                                                model_dir_or_path=table_config.get("unet.model_dir_or_path"),
                                                engine_cfg=engine_cfg or {}, )
@@ -90,6 +91,31 @@ class RapidTableModel(object):
                                          model_dir_or_path=table_config.get("model_dir_or_path"),
                                          engine_cfg=engine_cfg or {}, engine_type=table_config.get("engine_type"), )
             self.table_model = RapidTable(input_args)
+
+    @staticmethod
+    def _try_load_table_cls(table_config):
+        """Try to load the table classification model (paddle_cls.onnx). Returns None on failure."""
+        cls_model_path = table_config.get("cls.model_dir_or_path")
+        if cls_model_path is not None and not Path(cls_model_path).exists():
+            logger.warning(
+                f"Table classification model file not found: {cls_model_path}. "
+                "All tables will be treated as wired tables."
+            )
+            return None
+        try:
+            return TableCls(model_path=cls_model_path)
+        except Exception as e:
+            logger.warning(
+                f"Failed to load table classification model: {e}. "
+                "All tables will be treated as wired tables."
+            )
+            return None
+
+    def _classify_table(self, image):
+        """Classify the table type. Returns 'wired' if table_cls is unavailable."""
+        if self.table_cls is None:
+            return "wired", 0.0
+        return self.table_cls(image)
 
     def predict(self, image, ocr_result=None, fill_image_res=None, mfd_res=None, skip_text_in_image=True, use_img2table=False):
         bgr_image = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
@@ -183,7 +209,7 @@ class RapidTableModel(object):
                 from rapid_doc.model.table.img2table_self.image import Image
                 from rapid_doc.model.table.img2table_self.RapidOcrTable import RapidOcrTable
 
-                cls, elasp = self.table_cls(image)
+                cls, elasp = self._classify_table(image)
                 if cls == "wired":
                     borderless_tables = False
                 else:
@@ -213,7 +239,7 @@ class RapidTableModel(object):
         try:
             if self.model_type == ModelType.SLANEXT:
                 if not cls:
-                    cls, elasp = self.table_cls(bgr_image)
+                    cls, elasp = self._classify_table(bgr_image)
                 if cls == "wired":
                     cell_res = self.wired_table_cell([bgr_image])
                     model_runner = (self.wired_table_model)
@@ -224,7 +250,7 @@ class RapidTableModel(object):
                 table_results = model_runner(bgr_image, ocr_result, cell_results=cell_results)
             elif self.model_type == ModelType.UNET_SLANET_PLUS or self.model_type == ModelType.UNET_UNITABLE:
                 if not cls:
-                    cls, elasp = self.table_cls(bgr_image)
+                    cls, elasp = self._classify_table(bgr_image)
                 if cls == "wired":
                     table_results = self.wired_table_model(bgr_image, ocr_result)
                 else:  # wireless
