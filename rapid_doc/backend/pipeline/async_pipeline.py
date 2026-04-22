@@ -658,6 +658,16 @@ class TrueAsyncPipeline:
         title = f"{pipeline_name} PERFORMANCE SUMMARY" if pipeline_name else "PERFORMANCE SUMMARY"
         logger.info(f"{title:^{W}}")
         logger.info("=" * W)
+
+        # Model loading time
+        model_load_times = getattr(self.model, 'model_load_times', None)
+        if model_load_times:
+            total_load = sum(model_load_times.values())
+            logger.info(f" {'Model Loading':<16} {total_load:>10.2f} s")
+            for name, elapsed in model_load_times.items():
+                logger.info(f"   {name:<14} {elapsed:>10.2f} s")
+            logger.info("-" * W)
+
         logger.info(f" {'Pipeline Step':<16} {'Avg Latency':>14} {'Throughput':>14}     ")
         logger.info("-" * W)
 

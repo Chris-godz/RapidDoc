@@ -1,4 +1,5 @@
 import os
+import time
 
 from loguru import logger
 
@@ -162,33 +163,40 @@ class MineruPipelineModel:
             'DocAnalysis init, this may take some times......'
         )
         atom_model_manager = AtomModelSingleton()
+        self.model_load_times: dict[str, float] = {}
 
         if self.apply_formula:
-            # 初始化公式解析模型
+            t0 = time.perf_counter()
             self.formula_model = atom_model_manager.get_atom_model(
                 atom_model_name=AtomicModel.FORMULA,
                 device=self.device,
                 formula_config=self.formula_config,
             )
+            self.model_load_times['formula'] = time.perf_counter() - t0
 
-        # 初始化layout模型
+        t0 = time.perf_counter()
         self.layout_model = atom_model_manager.get_atom_model(
             atom_model_name=AtomicModel.Layout,
             device=self.device,
             layout_config=self.layout_config,
         )
-        # 初始化ocr
+        self.model_load_times['layout'] = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
         self.ocr_model = atom_model_manager.get_atom_model(
             atom_model_name=AtomicModel.OCR,
             det_db_box_thresh=0.3,
             ocr_config=self.ocr_config,
         )
-        # init table model
+        self.model_load_times['ocr'] = time.perf_counter() - t0
+
         if self.apply_table:
+            t0 = time.perf_counter()
             self.table_model = atom_model_manager.get_atom_model(
                 atom_model_name=AtomicModel.Table,
                 ocr_config=self.ocr_config,
                 table_config=self.table_config,
             )
+            self.model_load_times['table'] = time.perf_counter() - t0
 
         logger.info('DocAnalysis init done!')

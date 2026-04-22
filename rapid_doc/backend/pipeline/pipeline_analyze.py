@@ -81,7 +81,10 @@ def custom_model_init(
     custom_model = MineruPipelineModel(**model_input)
 
     model_init_cost = time.time() - model_init_start
-    logger.info(f'model init cost: {model_init_cost}')
+    logger.info(f'model init cost: {model_init_cost:.2f}s')
+    if custom_model.model_load_times:
+        for name, elapsed in custom_model.model_load_times.items():
+            logger.info(f'  {name:<12s}: {elapsed:.2f}s')
 
     return custom_model
 

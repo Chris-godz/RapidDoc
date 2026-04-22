@@ -769,6 +769,15 @@ class BatchAnalyze:
         logger.info("📈 Performance Summary")
         logger.info("=" * 80)
         
+        # Model loading time
+        model_load_times = getattr(self.model, 'model_load_times', None)
+        if model_load_times:
+            total_load = sum(model_load_times.values())
+            logger.info(f"🔧 Model Loading  | {total_load:7.2f}s total")
+            for name, elapsed in model_load_times.items():
+                logger.info(f"     {name:<12s} | {elapsed:7.2f}s")
+            logger.info("-" * 80)
+        
         total_time = 0
         model_info = []
         
