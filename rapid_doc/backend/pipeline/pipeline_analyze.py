@@ -277,7 +277,7 @@ def doc_analyze(
             page_count = pdf_page_counts.get(pdf_idx, 0)
 
             logger.info("=" * W)
-            title = f"PDF #{pdf_idx} PERFORMANCE SUMMARY"
+            title = f"PDF #{pdf_idx} PERFORMANCE SUMMARY ({total_time:.2f}s)"
             logger.info(f"{title:^{W}}")
             logger.info("=" * W)
             logger.info(f" {'Pipeline Step':<16} {'Avg Latency':>14} {'Throughput':>14}     ")

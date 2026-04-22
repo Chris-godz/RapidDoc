@@ -692,6 +692,21 @@ class TrueAsyncPipeline:
 
         logger.info("=" * W)
 
+        # Per-document elapsed time
+        if self.pdf_perf_stats:
+            logger.info("")
+            logger.info("=" * W)
+            logger.info(f"{'PER-DOCUMENT ELAPSED TIME':^{W}}")
+            logger.info("=" * W)
+            logger.info(f" {'Document':<16} {'Total Time (s)':>14} {'Pages':>10}")
+            logger.info("-" * W)
+            for pdf_idx in sorted(self.pdf_perf_stats.keys()):
+                pdf_stats = self.pdf_perf_stats[pdf_idx]
+                doc_total = sum(s['time'] for s in pdf_stats.values())
+                page_count = max(s['count'] for s in pdf_stats.values()) if pdf_stats else 0
+                logger.info(f" {'PDF #' + str(pdf_idx):<16} {doc_total:>14.2f} {page_count:>10}")
+            logger.info("=" * W)
+
     # ─────────────── 단일 페이지 처리 메서드 (StreamingPipeline 용) ────────────
 
     def _layout_one(self, ctx: PageContext) -> None:
