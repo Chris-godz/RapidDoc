@@ -482,7 +482,32 @@ class TrueAsyncPipeline:
         return 1
 
     def _ocr_det_single(self, ocr_model, all_items) -> int:
-        """개별 이미지 처리 (DxOcrModel 등 det_batch_predict 미지원 모델용)."""
+        """Dispatch detection: batch path for DxOcrModel, sequential for others."""
+        from rapid_doc.model.ocr.dx_ocr import DxOcrModel
+
+        if isinstance(ocr_model, DxOcrModel) and hasattr(ocr_model, 'ocr_det_batch'):
+            images = [bgr_image for _ctx, _res, _adj, bgr_image, _ul in all_items]
+            mfd_list = [adj for _ctx, _res, adj, _bgr, _ul in all_items]
+            try:
+                batch_results = ocr_model.ocr_det_batch(images, mfd_list)
+            except Exception as e:
+                logger.error(f"Batch det failed: {e}, falling back to sequential")
+                return self._ocr_det_single_sequential(ocr_model, all_items)
+
+            count = 0
+            for (ctx, _res, _adj, bgr_image, useful_list), ocr_res in zip(all_items, batch_results):
+                if ocr_res:
+                    result_list = get_ocr_result_list(
+                        ocr_res, useful_list, ctx.ocr_enable, bgr_image, None
+                    )
+                    ctx.layout_res.extend(result_list)
+                    count += 1
+            return count
+        else:
+            return self._ocr_det_single_sequential(ocr_model, all_items)
+
+    def _ocr_det_single_sequential(self, ocr_model, all_items) -> int:
+        """Sequential per-image detection (fallback for non-DX models)."""
         count = 0
         for ctx, _res, adjusted, bgr_image, useful_list in tqdm(all_items, desc="OCR-det"):
             ocr_res = ocr_model.ocr(bgr_image, mfd_res=adjusted, rec=False)[0]
@@ -1080,9 +1105,8 @@ class StreamingPipeline(TrueAsyncPipeline):
         with self._perf_lock:
             self._streaming_perf[key]['time']  += elapsed
             self._streaming_perf[key]['count'] += count
-            per_item = elapsed / max(count, 1)
-            self.pdf_perf_stats[ctx.pdf_idx][key]['time']  += per_item
-            self.pdf_perf_stats[ctx.pdf_idx][key]['count'] += 1
+            self.pdf_perf_stats[ctx.pdf_idx][key]['time']  += elapsed
+            self.pdf_perf_stats[ctx.pdf_idx][key]['count'] += count
 
 
 # ─────────────────────────────────────────────────────────────────────────────

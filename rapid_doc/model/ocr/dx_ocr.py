@@ -1355,29 +1355,33 @@ class DxOcrModel:
                         img = [img]
                     
                     if self.use_multi_rec_model:
-                        rec_results = []
+                        from collections import defaultdict as _defaultdict
+                        # Phase 1: Group crops by ratio
+                        ratio_groups = _defaultdict(list)
                         for crop_idx, crop_img in enumerate(img):
+                            if self.save_debug_images:
+                                crop_path = f"{self.debug_save_dir}/rec_crops/rec_crop_{self.debug_counter:06d}_{crop_idx:03d}.jpg"
+                                cv2.imwrite(crop_path, crop_img)
                             h, w = crop_img.shape[:2]
                             ratio = self.rec_router(w, h)
-                            
-                            if ratio in self.rec_recognizer_map:
-                                recognizer = self.rec_recognizer_map[ratio]
-                                rec_result = recognizer([crop_img])
-                                
-                                if rec_result.txts and len(rec_result.txts) > 0:
-                                    text, score = rec_result.txts[0], rec_result.scores[0]
-                                    rec_results.append((text, score))
-                                    if self.save_debug_images:
-                                        crop_path = f"{self.debug_save_dir}/rec_crops/rec_crop_{self.debug_counter:06d}_{crop_idx:03d}.jpg"
-                                        cv2.imwrite(crop_path, crop_img)
-                                else:
-                                    rec_results.append(("", 0.0))
-                            else:
-                                rec_result = self.text_recognizer([crop_img])
-                                if rec_result.txts and len(rec_result.txts) > 0:
-                                    rec_results.append((rec_result.txts[0], rec_result.scores[0]))
-                                else:
-                                    rec_results.append(("", 0.0))
+                            ratio_groups[ratio].append((crop_idx, crop_img))
+
+                        # Phase 2: Submit each ratio group as a single batch
+                        total_crops = len(img)
+                        rec_results = [("", 0.0)] * total_crops
+
+                        for ratio, group in ratio_groups.items():
+                            recognizer = self.rec_recognizer_map.get(ratio, self.text_recognizer)
+                            crop_imgs = [crop for _, crop in group]
+                            try:
+                                rec_result = recognizer(crop_imgs)
+                                if rec_result.txts:
+                                    for (orig_idx, _), text, score in zip(
+                                        group, rec_result.txts, rec_result.scores
+                                    ):
+                                        rec_results[orig_idx] = (text, score)
+                            except Exception as e:
+                                logger.error(f"Batch rec failed for ratio {ratio}: {e}")
                         
                         if self.save_debug_images and len(img) > 0:
                             self.debug_counter += 1
@@ -1398,9 +1402,109 @@ class DxOcrModel:
                 
                 return ocr_res
     
+    DET_BATCH_CHUNK_SIZE = 16
+
+    def ocr_det_batch(self, images, mfd_res_list=None):
+        """Batch detection: submit all images, then wait for all results.
+
+        Processes in chunks of DET_BATCH_CHUNK_SIZE to limit memory.
+        Falls back to sequential processing on chunk failure.
+        """
+        all_results = []
+
+        for chunk_start in range(0, len(images), self.DET_BATCH_CHUNK_SIZE):
+            chunk_end = min(chunk_start + self.DET_BATCH_CHUNK_SIZE, len(images))
+            chunk_imgs = images[chunk_start:chunk_end]
+            chunk_mfds = (
+                mfd_res_list[chunk_start:chunk_end]
+                if mfd_res_list
+                else [None] * len(chunk_imgs)
+            )
+            try:
+                chunk_results = self._det_batch_chunk(chunk_imgs, chunk_mfds)
+                all_results.extend(chunk_results)
+            except Exception as e:
+                logger.error(f"Batch det chunk failed: {e}, falling back to sequential")
+                for i, img in enumerate(chunk_imgs):
+                    mfd = chunk_mfds[i]
+                    try:
+                        seq_res = self.ocr(img, det=True, rec=False, mfd_res=mfd)
+                        all_results.append(seq_res[0] if seq_res else None)
+                    except Exception:
+                        all_results.append(None)
+
+        return all_results
+
+    def _det_batch_chunk(self, images, mfd_list):
+        """Process one chunk: preprocess → submit → wait → postprocess."""
+        preprocessed = []
+        ori_images = []
+        for img in images:
+            img = preprocess_image(img)
+            ori_images.append(img.copy() if self.save_debug_images else None)
+            preprocessed.append(img)
+
+        results = []
+
+        if self.text_detector.use_async:
+            with self.text_detector._infer_lock:
+                # Phase 1: Submit all
+                request_infos = []
+                for i, img in enumerate(preprocessed):
+                    if self.save_debug_images:
+                        det_path = f"{self.debug_save_dir}/det_input/det_input_{self.debug_counter + i:06d}.jpg"
+                        cv2.imwrite(det_path, img)
+                    req_id = self.text_detector.run_async(img, callback=None)
+                    request_infos.append((req_id, img, mfd_list[i], i))
+
+                # Phase 2: Wait for all
+                for req_id, img, mfd_res, local_idx in request_infos:
+                    if req_id == -1:
+                        results.append(None)
+                        continue
+                    det_res = self.text_detector.wait_request(req_id)
+                    boxes = self._postprocess_det_result(
+                        det_res, img, mfd_res, ori_images[local_idx], local_idx
+                    )
+                    results.append(boxes)
+        else:
+            # Sync mode: use __call__ per item
+            for i, img in enumerate(preprocessed):
+                if self.save_debug_images:
+                    det_path = f"{self.debug_save_dir}/det_input/det_input_{self.debug_counter + i:06d}.jpg"
+                    cv2.imwrite(det_path, img)
+                det_res = self.text_detector(img)
+                boxes = self._postprocess_det_result(
+                    det_res, img, mfd_list[i], ori_images[i], i
+                )
+                results.append(boxes)
+
+        self.debug_counter += len(images)
+        return results
+
+    def _postprocess_det_result(self, det_res, img, mfd_res, ori_img, local_idx):
+        """Shared post-processing for a single detection result."""
+        dt_boxes = det_res.boxes
+        if dt_boxes is None:
+            return None
+        dt_boxes = np.array(dt_boxes)
+        dt_boxes = sorted_boxes(dt_boxes)
+        if self.enable_merge_det_boxes:
+            dt_boxes = merge_det_boxes(dt_boxes)
+        if mfd_res:
+            dt_boxes = update_det_boxes(dt_boxes, mfd_res)
+        if self.save_debug_images and ori_img is not None:
+            img_with_boxes = ori_img.copy()
+            for box in dt_boxes:
+                box_arr = np.array(box).astype(np.int32).reshape((-1, 1, 2))
+                cv2.polylines(img_with_boxes, [box_arr], True, (0, 255, 0), 2)
+            bbox_path = f"{self.debug_save_dir}/det_input/det_bbox_{self.debug_counter + local_idx:06d}.jpg"
+            cv2.imwrite(bbox_path, img_with_boxes)
+        return [box.tolist() for box in dt_boxes]
+    
     def __call__(self, img, mfd_res=None):
         """Run detection + recognition (each protected by _infer_lock in DxTextDetector/DxTextRecognizer)"""
-        logger.info(f"🔍 DX OCR __call__ invoked | save_debug_images={self.save_debug_images} | counter={self.debug_counter}")
+        logger.debug(f"DX OCR __call__ invoked | save_debug_images={self.save_debug_images} | counter={self.debug_counter}")
         
         if img is None:
             logger.debug("no valid image provided")
@@ -1412,7 +1516,7 @@ class DxOcrModel:
         if self.save_debug_images:
             det_input_path = f"{self.debug_save_dir}/det_input/det_input_{self.debug_counter:06d}.jpg"
             cv2.imwrite(det_input_path, img)
-            logger.info(f"✅ Saved detection input: {det_input_path}")
+            logger.debug(f"Saved detection input: {det_input_path}")
         
         # 1. 텍스트 검출
         det_res = self.text_detector(img)
@@ -1439,7 +1543,7 @@ class DxOcrModel:
                 cv2.polylines(img_with_boxes, [box], True, (0, 255, 0), 2)
             det_bbox_path = f"{self.debug_save_dir}/det_input/det_bbox_{self.debug_counter:06d}.jpg"
             cv2.imwrite(det_bbox_path, img_with_boxes)
-            logger.info(f"✅ Saved detection bbox: {det_bbox_path}")
+            logger.debug(f"Saved detection bbox: {det_bbox_path}")
         
         # 3. 텍스트 영역 크롭
         img_crop_list = []

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Union, Set, Tuple
 import cv2
 import numpy as np
 import shapely
+from loguru import logger
 from shapely.geometry import MultiPoint, Polygon
 
 
@@ -286,7 +287,7 @@ def compute_poly_iou(a: np.ndarray, b: np.ndarray) -> float:
         inter_area = poly1.intersection(poly2).area
         union_area = MultiPoint(union_poly).convex_hull.area
     except shapely.geos.TopologicalError:
-        print("shapely.geos.TopologicalError occured, iou set to 0")
+        logger.warning("shapely.geos.TopologicalError occured, iou set to 0")
         return 0.0
 
     if union_area == 0:

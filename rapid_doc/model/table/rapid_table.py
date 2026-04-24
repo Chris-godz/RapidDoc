@@ -237,24 +237,29 @@ class RapidTableModel(object):
 
         """使用 rapid_table_self 识别"""
         try:
+            _WIRELESS_PLACEHOLDER_HTML = (
+                "<table><tr><td>wireless table recognition is not supported</td></tr></table>"
+            )
+
             if self.model_type == ModelType.SLANEXT:
                 if not cls:
                     cls, elasp = self._classify_table(bgr_image)
                 if cls == "wired":
                     cell_res = self.wired_table_cell([bgr_image])
                     model_runner = (self.wired_table_model)
-                else:  # wireless
-                    cell_res = self.wireless_table_cell([bgr_image])
-                    model_runner = (self.wireless_table_model)
-                cell_results = (cell_res[0].boxes, cell_res[0].scores)
-                table_results = model_runner(bgr_image, ocr_result, cell_results=cell_results)
+                    cell_results = (cell_res[0].boxes, cell_res[0].scores)
+                    table_results = model_runner(bgr_image, ocr_result, cell_results=cell_results)
+                else:  # wireless — skip inference
+                    logger.info("Wireless table detected — skipping inference")
+                    return _WIRELESS_PLACEHOLDER_HTML, [], [], 0
             elif self.model_type == ModelType.UNET_SLANET_PLUS or self.model_type == ModelType.UNET_UNITABLE:
                 if not cls:
                     cls, elasp = self._classify_table(bgr_image)
                 if cls == "wired":
                     table_results = self.wired_table_model(bgr_image, ocr_result)
-                else:  # wireless
-                    table_results = self.wireless_table_model(bgr_image, ocr_result)
+                else:  # wireless — skip inference
+                    logger.info("Wireless table detected — skipping inference")
+                    return _WIRELESS_PLACEHOLDER_HTML, [], [], 0
             else:
                 table_results = self.table_model(bgr_image, ocr_result)
 

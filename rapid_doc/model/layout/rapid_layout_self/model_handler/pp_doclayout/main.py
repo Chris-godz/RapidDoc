@@ -3,6 +3,7 @@ import threading
 from typing import List, Union, Optional, Callable
 
 import numpy as np
+from loguru import logger
 
 from ...inference_engine.base import InferSession
 from ...utils.typings import RapidLayoutOutput
@@ -158,9 +159,7 @@ class PPDocLayoutModelHandler(BaseModelHandler):
                     cv.notify()
                     
             except Exception as e:
-                import traceback
-                print(f"Layout async callback error for page {page_idx}: {e}")
-                traceback.print_exc()
+                logger.warning(f"Layout async callback error for page {page_idx}: {e}", exc_info=True)
                 with lock:
                     # 에러 발생 시에도 더미 결과 저장
                     results[page_idx] = RapidLayoutOutput(

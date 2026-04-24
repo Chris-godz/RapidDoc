@@ -98,7 +98,7 @@ class RapidOcrModel(object):
             devices = core.available_devices
             return bool(devices)
         except Exception as e:
-            print(f"OpenVINO 可用性检查出错: {e}")
+            logger.warning(f"OpenVINO availability check error: {e}")
             return False
 
     def ocr(self,

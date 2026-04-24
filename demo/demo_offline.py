@@ -597,14 +597,18 @@ examples:
         '--force-ocr', action='store_true', default=False,
         help='Ignore PDF text metadata and always use image→OCR path (for model evaluation)',
     )
+    parser.add_argument(
+        '--no-formula', action='store_true', default=False,
+        help='Disable formula recognition (skip ONNX formula inference entirely)',
+    )
     parser.set_defaults(pipeline_mode=False)  # Default: sync mode
     args = parser.parse_args()
     
     # =========================================================================
     # 모델 활성화 설정
     # =========================================================================
-    FORMULA_ENABLE = True   # 수식 인식 모델 사용 여부 (True/False)
-    FORMULA_REC_ENABLE = True  # False: ONNX 추론 건너뛰고 수식 영역을 이미지로 유지
+    FORMULA_ENABLE = not args.no_formula
+    FORMULA_REC_ENABLE = not args.no_formula
     TABLE_ENABLE = True     # 표 인식 모델 사용 여부 (True/False) - UNET 모델 사용 (paddle_cls 불필요)
     
     # =========================================================================
