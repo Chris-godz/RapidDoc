@@ -582,11 +582,11 @@ examples:
     )
     pipeline_group.add_argument(
         '--finegrained', dest='pipeline_mode', action='store_const', const='finegrained',
-        help='Enable FinegrainedStreamingPipeline (7-stage per-page streaming)',
+        help='Enable FinegrainedStreamingPipeline (7-stage per-page streaming) [default]',
     )
     pipeline_group.add_argument(
         '--no-async', dest='pipeline_mode', action='store_const', const=False,
-        help='Disable async pipeline / sync mode (default)',
+        help='Disable async pipeline / sync mode',
     )
     parser.add_argument(
         '--output-dir', dest='output_dir', default=None,
@@ -601,7 +601,7 @@ examples:
         '--no-formula', action='store_true', default=False,
         help='Disable formula recognition (skip ONNX formula inference entirely)',
     )
-    parser.set_defaults(pipeline_mode=False)  # Default: sync mode
+    parser.set_defaults(pipeline_mode='finegrained')  # Default: finegrained (fastest pipeline)
     args = parser.parse_args()
     
     # =========================================================================
